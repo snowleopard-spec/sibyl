@@ -1,0 +1,35 @@
+{
+  "contract_version": "1.0",
+  "generated_at": "2026-06-13T08:30:00Z",
+  "count": 4,
+  "universe": [
+    {
+      "ticker": "AAPL",
+      "name": "Apple Inc.",
+      "sector": "TECH",
+      "market_cap": 3000000000000,
+      "exchange": "XNAS"
+    },
+    {
+      "ticker": "MSFT",
+      "name": "Microsoft Corporation",
+      "sector": "TECH",
+      "market_cap": 2800000000000,
+      "exchange": "XNAS"
+    },
+    {
+      "ticker": "ZZZZQ",
+      "name": "Delisted Holdings Inc.",
+      "sector": null,
+      "market_cap": null,
+      "exchange": null
+    },
+    {
+      "ticker": "abcd",
+      "name": "Lowercase Ticker Test Co.",
+      "sector": "OTHR",
+      "market_cap": 1450000000,
+      "exchange": "XNAS"
+    }
+  ]
+}
