@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS filing_signals (
     accession       TEXT NOT NULL,
     prior_accession TEXT,
     section         TEXT NOT NULL,
+    diff_version    TEXT NOT NULL DEFAULT '1',
     similarity_yoy  REAL,
     d_unc           REAL,
     d_lit           REAL,
@@ -84,6 +85,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     # Idempotent column-additions for older DBs created before a column existed.
     _ensure_column(conn, "filing_scores", "scorer_version", "TEXT NOT NULL DEFAULT '1'")
+    _ensure_column(conn, "filing_signals", "diff_version", "TEXT NOT NULL DEFAULT '1'")
     conn.commit()
 
 

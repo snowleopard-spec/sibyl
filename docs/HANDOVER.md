@@ -32,7 +32,7 @@ declared trusted; **Stage 4 (L&M scoring) is the next action**.
 | **2 — `sibyl parse`** | ✅ done | 9,143 / 9,144 ok (99.99%). 1 expected fail (Windstream shell). Eyeball gate passed. 3.0 GB clean |
 | **3 — `sibyl sections`** | ✅ done; LLM audit + extractor hardening applied | `edgartools` (pinned 5.36.0) via `LocalFiling` override + `ProcessPoolExecutor`. Post-fix corpus: **8,890** both-ok / 253 section_fail (was 9,008/135 originally; two rounds of remediation purged 118 stub MDNAs). Two LLM audits (N=100 each, seeds 42+43): both returned 66% combined-clean, ~80% per-section clean. See `docs/parallel_processing.md` + audit scripts in `scripts/`. |
 | **4 — `sibyl score`** | ✅ done | Tokenize + L&M counts → `filing_scores`. Two weightings (proportional + tfidf), three sections (full / risk_factors / mdna). 8,890 filings × 6 rows = 53,340 rows. Corpus DF built from full.txt of all eligible filings. ~6 min single-threaded. |
-| 5 — `sibyl diff` | ⏸ stub |
+| **5 — `sibyl diff`** | ✅ done | YoY cosine similarity (L&M-weighted tfidf vectors) + Δneg/Δunc/Δlit per section. 7,835 filings (1,055 had no prior 10-K) × 3 sections = 23,505 rows in `filing_signals`. Alignment audit: 99.20% of pairs within 300-430 days of period_of_report (median 365). ~6 min single-threaded. |
 | 6 — `sibyl panel` | ⏸ stub (Phase 2) |
 | 7 — `sibyl prices` | ⏸ stub (Phase 2) |
 | 8 — `sibyl eval` | ⏸ stub (Phase 2) |
@@ -45,14 +45,37 @@ multiprocessing workers-parity + picklable checks).
 
 ## The single action to take when resuming
 
-**Plan Stage 5 — `sibyl diff`.** Stage 4 is complete: 8,890 filings ×
-3 sections × 2 weightings = 53,340 rows in `filing_scores`. Stage 5
-computes year-over-year textual similarity (Lazy Prices signal) and
-sentiment deltas (ΔUncertainty, ΔLitigious, ΔNegative) per spec §11.
-Key correctness concern: yoy alignment — match the same-period
-prior-year filing of the same form type via `acceptance_dt` and
-`form_type` on `filings`. Schema for output is already in place
-(`filing_signals` table).
+**Phase 1 (the EDGAR pipeline) is complete.** All Layer-1 stages 0-5
+are done. Next is **Phase 2 — Layer 2 / signal layer** (`sibyl panel`,
+spec §6/§Stage 6): standardize raw scores (z-score or rank within
+each rebalance date), sector-neutralize, assemble a `date × CIK ×
+signal_name × zscore` panel. Sector metadata comes from the
+`universe_membership` table.
+
+Then `sibyl prices` (cache Polygon prices for the universe) and the
+**evaluation engine** under `sibyl/eval/` — IC, IC-decay, quantile
+spreads, turnover, cost-aware backtest. The eval engine is the
+signal-agnostic crown jewel per spec §3: it operates on any panel +
+price series, not just L&M.
+
+### Stage 5 output sanity check (2026-06-19)
+
+Per-section similarity + delta distributions across 7,835 paired filings:
+
+| Section | sim P5 | sim P50 | sim P95 | d_neg P5 | d_neg P50 | d_neg P95 |
+|---|---|---|---|---|---|---|
+| risk_factors | 0.68 | **0.90** | 0.98 | −0.0023 | +0.0003 | +0.0039 |
+| full | 0.68 | 0.87 | 0.95 | −0.0015 | +0.0003 | +0.0026 |
+| mdna | 0.55 | 0.81 | 0.94 | −0.0034 | +0.0000 | +0.0037 |
+
+RF most stable, MDNA most volatile — exactly as the Lazy Prices
+literature describes. P50 deltas are near-zero (no systematic year
+shift); the tails are where the signal lives.
+
+**Alignment audit**: 99.20% of paired filings have period_of_report
+gap within 300-430 days; median 365. P5/P95 = 364/366. This was the
+spec's "load-bearing checkpoint" — mismatched priors would have
+produced parsing noise instead of signal. Passes.
 
 ### Stage 4 output sanity check (2026-06-19)
 
