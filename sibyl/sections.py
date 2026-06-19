@@ -34,7 +34,9 @@ OVER_EXTRACTED_WORDS = 50_000
 OVER_EXTRACTED_FULL_RATIO = 0.95
 YOY_JUMP_RATIO = 5.0
 INCORP_REF_RE = re.compile(
-    r"\b(incorporated\s+by\s+reference|see\s+our\s+proxy|annual\s+proxy\s+statement)\b",
+    r"\bincorporated\b(?:\s+\w+){0,3}\s+by\s+reference\b"
+    r"|\bsee\s+our\s+proxy\b"
+    r"|\bannual\s+proxy\s+statement\b",
     re.IGNORECASE,
 )
 
