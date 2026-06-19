@@ -30,7 +30,7 @@ declared trusted; **Stage 4 (L&M scoring) is the next action**.
 | **0 — `sibyl universe`** | ✅ done | 1,263 tickers from Unicorn, 1,263 CIKs resolved (8 dotted share classes still unresolved) |
 | **1 — `sibyl download`** | ✅ done | 9,144 10-Ks, 2.4 GB raw, 0 failures. v1 scope: 10-K only, 2016+, no amendments |
 | **2 — `sibyl parse`** | ✅ done | 9,143 / 9,144 ok (99.99%). 1 expected fail (Windstream shell). Eyeball gate passed. 3.0 GB clean |
-| **3 — `sibyl sections`** | ✅ done; LLM audit + incorp_ref fix applied | `edgartools` (pinned 5.36.0) via `LocalFiling` override + `ProcessPoolExecutor`. Post-fix corpus: 8,956 both-ok / 187 section_fail (was 9,008/135 before regex fix caught 52 hidden MDNA stubs). LLM audit (100 samples): RF 80% clean / 20% partial / 0 wrong, MDNA 79% clean / 19% partial / 2 wrong. See `docs/parallel_processing.md` + audit scripts in `scripts/`. |
+| **3 — `sibyl sections`** | ✅ done; LLM audit + extractor hardening applied | `edgartools` (pinned 5.36.0) via `LocalFiling` override + `ProcessPoolExecutor`. Post-fix corpus: **8,890** both-ok / 253 section_fail (was 9,008/135 originally; two rounds of remediation purged 118 stub MDNAs). Two LLM audits (N=100 each, seeds 42+43): both returned 66% combined-clean, ~80% per-section clean. See `docs/parallel_processing.md` + audit scripts in `scripts/`. |
 | 4 — `sibyl score` | ⏸ stub. L&M dictionary already downloaded |
 | 5 — `sibyl diff` | ⏸ stub |
 | 6 — `sibyl panel` | ⏸ stub (Phase 2) |
@@ -58,22 +58,29 @@ suspenders if Stage 5 yoy signal looks noisy later).
 
 ### LLM audit outcome (2026-06-19)
 
-N=100 random both-ok filings, judged in-context via Claude Code
-subagents (10 batches × 10 files, parallel). No API spend.
+Two independent N=100 audits (seeds 42 + 43), both judged in-context
+via Claude Code subagents (10 batches × 10 files, parallel). No API
+spend. Both runs hit **66% combined-clean / ~80% per-section clean** —
+strong consistency signal that the corpus is stable at that rate.
+Below the strict 90% gate, but partials are dominated by cosmetic
+header/footer drift the HANDOVER already accepts as known limitations.
 
-- risk_factors: **80** clean / **20** partial / **0** wrong
-- mdna:        **79** clean / **19** partial / **2** wrong
-- combined clean: **66/100 (66%)** — below the strict 90% gate, but
-  failures are dominated by cosmetic header/footer drift the
-  HANDOVER already accepts as known limitations.
+**Real findings + fixes applied:**
 
-**Real finding:** the `INCORP_REF_RE` regex required "incorporated"
-to be immediately followed by "by reference", missing the common
-"incorporated **herein** by reference" phrasing. Regex patched
-(`sibyl/sections.py`); `scripts/remediate_incorp_ref.py` re-classified
-**52 MDNA stubs** as `incorp_ref` (filings flipped from `ok` →
-`section_fail`). These would otherwise have produced near-zero L&M
-counts in Stage 4.
+1. `INCORP_REF_RE` previously required "incorporated" to be
+   immediately followed by "by reference", missing variants like
+   "incorporated **herein** by reference" and "incorporated herein by
+   **this** reference". Regex now allows ≤3 words between
+   "incorporated"/"by" and ≤1 word between "by"/"reference".
+2. `_section_status` for MDNA previously returned `ok` even for 14-
+   word TOC-fragment extractions. Added `MDNA_MIN_REAL_WORDS = 100`
+   hard floor (MDNA only — RF can be legitimately tiny for shell
+   filers).
+
+Two remediation runs (`scripts/remediate_incorp_ref.py`) purged a
+total of **118 MDNA stubs** corpus-wide (52 in round 1 after fix #1,
+68 in round 2 after fixes #1 expansion + #2). All would have produced
+near-zero L&M counts in Stage 4 that contaminated downstream signals.
 
 To re-run the audit (e.g. after a parser bump):
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Re-classify short Stage-3 section extractions under the patched
-INCORP_REF_RE regex. Only affects filings whose mdna.txt or
-risk_factors.txt is short enough to plausibly be an incorporation-by-
-reference stub (< INCORP_REF_MAX_WORDS).
+"""Re-classify short Stage-3 section extractions under the current
+_section_status logic (patched INCORP_REF_RE + MDNA hard floor).
+Only inspects sections short enough to plausibly fail one of these
+checks (word_count < INCORP_REF_MAX_WORDS).
 
 The text on disk is unchanged — only the section status in sections.json
 and the filing's parse_status in sibyl.db are updated.
+
+Idempotent: re-running after a clean corpus is a no-op.
 
 Usage:
   python scripts/remediate_incorp_ref.py [--dry-run]
@@ -21,6 +23,7 @@ from sibyl.config import load_config
 from sibyl.parse import filing_clean_dir
 from sibyl.sections import (
     INCORP_REF_MAX_WORDS,
+    MDNA_MIN_REAL_WORDS,
     SECTIONS,
     _section_status,
 )
@@ -70,7 +73,8 @@ def main() -> int:
                 if not text_path.exists():
                     continue
                 text = text_path.read_text(encoding="utf-8")
-                new_status, info = _section_status(text, full_word_count=full_wc)
+                hard_floor = MDNA_MIN_REAL_WORDS if sect == "mdna" else 0
+                new_status, info = _section_status(text, full_word_count=full_wc, hard_floor=hard_floor)
                 if new_status == block.get("status"):
                     continue
                 changes.append((cik, acc_dir.name, sect, block.get("status"), new_status))

@@ -34,11 +34,15 @@ OVER_EXTRACTED_WORDS = 50_000
 OVER_EXTRACTED_FULL_RATIO = 0.95
 YOY_JUMP_RATIO = 5.0
 INCORP_REF_RE = re.compile(
-    r"\bincorporated\b(?:\s+\w+){0,3}\s+by\s+reference\b"
+    r"\bincorporated\b(?:\s+\w+){0,3}\s+by\b(?:\s+\w+){0,1}\s+reference\b"
     r"|\bsee\s+our\s+proxy\b"
     r"|\bannual\s+proxy\s+statement\b",
     re.IGNORECASE,
 )
+
+# Sections shorter than this are too short to be real content — flip status off 'ok'.
+# Applied to MDNA only; risk_factors can be legitimately tiny for shell / smaller-reporting filers.
+MDNA_MIN_REAL_WORDS = 100
 
 SECTIONS = ("risk_factors", "mdna")
 
@@ -79,8 +83,13 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp_path.replace(path)
 
 
-def _section_status(text: str | None, *, full_word_count: int) -> tuple[str, dict]:
-    """Return (status, info_dict). info_dict has word_count, char_count, flags, head_excerpt."""
+def _section_status(text: str | None, *, full_word_count: int, hard_floor: int = 0) -> tuple[str, dict]:
+    """Return (status, info_dict). info_dict has word_count, char_count, flags, head_excerpt.
+
+    `hard_floor`: if word_count < this, return status='missing' regardless of other
+    checks. Used for MDNA (which is always long in legitimate filings); leave at 0
+    for risk_factors (smaller-reporting filers can have a 1-paragraph RF).
+    """
     text = text or ""
     word_count = len(text.split())
     char_count = len(text)
@@ -93,6 +102,12 @@ def _section_status(text: str | None, *, full_word_count: int) -> tuple[str, dic
         return "incorp_ref", {
             "word_count": word_count, "char_count": char_count,
             "suspicious_flags": ["incorp_ref_phrase"], "head_excerpt": text[:300],
+        }
+
+    if word_count < hard_floor:
+        return "missing", {
+            "word_count": word_count, "char_count": char_count,
+            "suspicious_flags": ["below_hard_floor"], "head_excerpt": text[:300],
         }
 
     if word_count > OVER_EXTRACTED_WORDS:
@@ -162,7 +177,7 @@ def extract_sections(
         mdna_text = ""
 
     rf_status, rf_info = _section_status(rf_text, full_word_count=full_word_count)
-    mdna_status, mdna_info = _section_status(mdna_text, full_word_count=full_word_count)
+    mdna_status, mdna_info = _section_status(mdna_text, full_word_count=full_word_count, hard_floor=MDNA_MIN_REAL_WORDS)
 
     if rf_status == "ok":
         _atomic_write_text(out_dir / "risk_factors.txt", rf_text)
