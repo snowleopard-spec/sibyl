@@ -58,12 +58,21 @@ suspenders if Stage 5 yoy signal looks noisy later).
 
 ### LLM audit outcome (2026-06-19)
 
-Two independent N=100 audits (seeds 42 + 43), both judged in-context
-via Claude Code subagents (10 batches × 10 files, parallel). No API
-spend. Both runs hit **66% combined-clean / ~80% per-section clean** —
-strong consistency signal that the corpus is stable at that rate.
-Below the strict 90% gate, but partials are dominated by cosmetic
-header/footer drift the HANDOVER already accepts as known limitations.
+Three rounds judged in-context via Claude Code subagents (no API spend):
+
+| Run | N | Seed | RF clean | MDNA clean | Combined clean |
+|---|---|---|---|---|---|
+| 1 (pre-remediation) | 100 | 42 | 80% | 79% | 66% |
+| 2 (pre-remediation) | 100 | 43 | 82% | 74% | 66% |
+| 3 (post-remediation) | **500** | 44 | **87.8%** | **83.2%** | **78.6%** |
+
+Run 3's higher clean rate is the corrected estimate: the two earlier
+runs sampled before remediation purged the 118 stub MDNAs that were
+dragging combined-clean down. N=500 also has tight CIs (~±3%).
+Combined-clean still below the strict 90% gate, but partials remain
+dominated by cosmetic header/footer drift the HANDOVER accepts as not
+moving L&M counts. Only 3 "wrong" cases in the N=500 sample (all RF,
+all edgartools mis-identifying section boundaries — 0.6% rate).
 
 **Real findings + fixes applied:**
 
