@@ -31,7 +31,7 @@ declared trusted; **Stage 4 (L&M scoring) is the next action**.
 | **1 — `sibyl download`** | ✅ done | 9,144 10-Ks, 2.4 GB raw, 0 failures. v1 scope: 10-K only, 2016+, no amendments |
 | **2 — `sibyl parse`** | ✅ done | 9,143 / 9,144 ok (99.99%). 1 expected fail (Windstream shell). Eyeball gate passed. 3.0 GB clean |
 | **3 — `sibyl sections`** | ✅ done; LLM audit + extractor hardening applied | `edgartools` (pinned 5.36.0) via `LocalFiling` override + `ProcessPoolExecutor`. Post-fix corpus: **8,890** both-ok / 253 section_fail (was 9,008/135 originally; two rounds of remediation purged 118 stub MDNAs). Two LLM audits (N=100 each, seeds 42+43): both returned 66% combined-clean, ~80% per-section clean. See `docs/parallel_processing.md` + audit scripts in `scripts/`. |
-| 4 — `sibyl score` | ⏸ stub. L&M dictionary already downloaded |
+| **4 — `sibyl score`** | ✅ done | Tokenize + L&M counts → `filing_scores`. Two weightings (proportional + tfidf), three sections (full / risk_factors / mdna). 8,890 filings × 6 rows = 53,340 rows. Corpus DF built from full.txt of all eligible filings. ~6 min single-threaded. |
 | 5 — `sibyl diff` | ⏸ stub |
 | 6 — `sibyl panel` | ⏸ stub (Phase 2) |
 | 7 — `sibyl prices` | ⏸ stub (Phase 2) |
@@ -45,13 +45,28 @@ multiprocessing workers-parity + picklable checks).
 
 ## The single action to take when resuming
 
-**Plan Stage 4 — `sibyl score`.** Stage 3 is trusted (see "LLM audit
-outcome" below). The L&M dictionary is downloaded and verified at
-`data/lm_master_dictionary.csv`. The DB schema already provides
-`filing_scores` for per-section / per-weighting outputs. Begin by
-sketching the scoring contract (which weightings, which token
-normalisation, what gets written to `filing_scores`), then implement
-against the 8,956 both-ok filings.
+**Plan Stage 5 — `sibyl diff`.** Stage 4 is complete: 8,890 filings ×
+3 sections × 2 weightings = 53,340 rows in `filing_scores`. Stage 5
+computes year-over-year textual similarity (Lazy Prices signal) and
+sentiment deltas (ΔUncertainty, ΔLitigious, ΔNegative) per spec §11.
+Key correctness concern: yoy alignment — match the same-period
+prior-year filing of the same form type via `acceptance_dt` and
+`form_type` on `filings`. Schema for output is already in place
+(`filing_signals` table).
+
+### Stage 4 output sanity check (2026-06-19)
+
+Mean L&M densities across the corpus, by section and weighting:
+
+| Section | neg | pos | unc | lit | weak_modal |
+|---|---|---|---|---|---|
+| risk_factors (n=8,890, avg 15,170 words) | **3.96%** | 0.94% | 3.33% | 1.50% | 2.32% |
+| full (n=8,890, avg 52,627 words) | 2.01% | 0.74% | 1.78% | 1.03% | 0.92% |
+| mdna (n=8,890, avg 9,730 words) | 1.32% | 0.69% | 1.31% | 0.58% | 0.40% |
+
+Matches the published L&M literature: RF is by far the most negative
+section, positive density is uniformly low (~0.7-0.9%), uncertainty
+tracks negative. Confirms `sibyl score` is producing sensible numbers.
 
 The hand-labelled `validation_labels.csv` remains deferred (belt-and-
 suspenders if Stage 5 yoy signal looks noisy later).

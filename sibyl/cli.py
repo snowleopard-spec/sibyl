@@ -11,9 +11,10 @@ from . import db as db_mod
 from . import download as download_mod
 from . import edgar, universe
 from . import parse as parse_mod
+from . import score as score_mod
 from . import sections as sections_mod
 
-STUB_COMMANDS = ("score", "diff", "prices", "panel", "eval", "export")
+STUB_COMMANDS = ("diff", "prices", "panel", "eval", "export")
 
 
 def _configure_logging(logs_dir: Path) -> None:
@@ -192,6 +193,31 @@ def cmd_sections(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_score(args: argparse.Namespace) -> int:
+    cfg = config_mod.load_config(args.config)
+    config_mod.ensure_dirs(cfg)
+    _configure_logging(cfg.paths.logs)
+    log = logging.getLogger("sibyl.cli")
+    conn = db_mod.connect(cfg.paths.db)
+    db_mod.init_schema(conn)
+
+    if args.stats:
+        print(score_mod.render_stats(score_mod.compute_stats(conn)))
+        return 0
+
+    counts = score_mod.score_all(
+        conn, cfg,
+        ciks=args.cik or None,
+        limit=args.limit,
+        force=args.force,
+    )
+    log.info("Filings scored:    %d", counts.processed)
+    log.info("Rows written:      %d", counts.rows_written)
+    log.info("Skipped (at v%s):   %d", score_mod.SCORER_VERSION, counts.skipped)
+    log.info("Errors:            %d", counts.errors)
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     cfg = config_mod.load_config(args.config)
     conn = db_mod.connect(cfg.paths.db)
@@ -268,6 +294,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_download.add_argument("--refresh-submissions", action="store_true",
                             help="Re-fetch submissions JSON even if cached.")
     p_download.set_defaults(func=cmd_download)
+
+    p_score = sub.add_parser("score", help="Stage 4: tokenize + L&M counts -> filing_scores")
+    p_score.add_argument("--cik", type=int, action="append", default=[],
+                         help="Score only this CIK (repeatable).")
+    p_score.add_argument("--limit", type=int, default=None, help="Stop after N filings.")
+    p_score.add_argument("--force", action="store_true",
+                         help="Re-score even if filing already has rows at current scorer_version.")
+    p_score.add_argument("--stats", action="store_true",
+                         help="Print per-section averages; skip scoring.")
+    p_score.set_defaults(func=cmd_score)
 
     p_status = sub.add_parser("status", help="DB and disk counts")
     p_status.set_defaults(func=cmd_status)
