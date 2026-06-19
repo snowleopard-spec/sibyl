@@ -42,22 +42,20 @@ multiprocessing workers-parity + picklable checks).
 
 ## The single action to take when resuming
 
-Do the **Layer 3 hand-labelling** of `data/clean/validation_labels.csv`
-per `docs/validation_labelling_guide.md`. ~30-60 min of manual work.
-Then:
+**Build the LLM audit script** per `docs/llm_audit_plan.md`. This is
+the validation step before Stage 4 — uses Claude to spot-check 100
+random Stage 3 extractions (both `risk_factors.txt` and `mdna.txt`)
+and reports % clean / partial / wrong + a list of failures.
 
-```bash
-.venv/bin/sibyl sections --validate
-```
+The hand-labelled `validation_labels.csv` is **deferred** (kept as
+belt-and-suspenders if Stage 5 yoy signal looks noisy later). The
+LLM audit gives better corpus-wide coverage for less manual work.
 
-**Gate criteria** (must pass before Stage 4):
-- Section recall ≥ 90%
-- Start-accuracy ≥ 85% (within 200 chars of true start)
+Prerequisite: `ANTHROPIC_API_KEY` env var (get one at
+`console.anthropic.com` if you don't have one).
 
-If gate passes → plan Stage 4 (L&M scoring per section). If it
-fails → look at the failing rows; the fix is usually a bump to
-`EXTRACTOR_VERSION` in `sibyl/sections.py` followed by
-`sibyl sections --force`.
+**Gate criteria** (must pass before Stage 4): ≥ 90% of audited
+filings have both sections judged `clean`.
 
 Diagnostic commands worth running anytime:
 
@@ -145,7 +143,8 @@ sibyl/
 │   ├── SIBYL BUILD SPEC.md            # spec (source of truth)
 │   ├── parallel_processing.md         # Stage 3 multiprocessing in plain terms
 │   ├── scaling_10q_with_cloud_vm.md   # runbook for the 10-Q expansion on a DO droplet
-│   └── validation_labelling_guide.md  # Layer 3 hand-labelling workflow
+│   ├── llm_audit_plan.md              # PLAN for next session: Claude-driven audit of Stage 3 extractions
+│   └── validation_labelling_guide.md  # Layer 3 hand-labelling workflow (DEFERRED)
 │
 ├── tests/               # 51 tests, all offline (mocked SEC for downloader)
 │   ├── test_config.py
