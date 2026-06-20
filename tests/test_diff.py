@@ -196,7 +196,7 @@ def _write_filing_files(clean_root, cik, accession, *, full, rf, mdna):
 def two_year_corpus(tmp_path, conn):
     """Two 10-Ks for CIK 100: 2020 + 2021."""
     from dataclasses import replace
-    from sibyl.config import Config, SecConfig, UnicornConfig, UniverseConfig, _resolve_paths
+    from sibyl.config import Config, SecConfig, UniverseConfig, _resolve_paths
     paths = replace(
         _resolve_paths(tmp_path, None, None),
         lm_dictionary=tmp_path / "lm.csv",
@@ -204,7 +204,6 @@ def two_year_corpus(tmp_path, conn):
     cfg = Config(
         paths=paths,
         sec=SecConfig(user_agent="t", rate_limit_per_sec=1),
-        unicorn=UnicornConfig(base_url="", universe_path="", expected_contract_version="1.0", token=None),
         universe=UniverseConfig(form_types=[], include_amendments=False, history_start="2016"),
         download_gzip=True,
     )

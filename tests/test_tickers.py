@@ -7,12 +7,11 @@ from sibyl import tickers
 
 
 def _cfg(tmp_path):
-    from sibyl.config import Config, SecConfig, UnicornConfig, UniverseConfig, _resolve_paths
+    from sibyl.config import Config, SecConfig, UniverseConfig, _resolve_paths
     paths = _resolve_paths(tmp_path, None, None)
     return Config(
         paths=paths,
         sec=SecConfig(user_agent="t", rate_limit_per_sec=1),
-        unicorn=UnicornConfig(base_url="", universe_path="", expected_contract_version="1.0", token=None),
         universe=UniverseConfig(form_types=[], include_amendments=False, history_start="2016"),
         download_gzip=True,
     )

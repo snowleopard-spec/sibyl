@@ -17,14 +17,13 @@ def test_init_schema_creates_all_tables():
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert {"universe_membership", "filings", "filing_scores", "filing_signals",
+    assert {"filings", "filing_scores", "filing_signals",
             "sp500_membership", "sp500_aggregates"} <= tables
 
     indexes = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='index'"
     )}
     expected_indexes = {
-        "idx_membership_cik", "idx_membership_date",
         "idx_filings_cik", "idx_filings_form", "idx_filings_accept", "idx_filings_stack",
         "idx_sp500_membership_sector", "idx_sp500_membership_cik",
         "idx_sp500_agg_scope",
@@ -32,7 +31,6 @@ def test_init_schema_creates_all_tables():
     assert expected_indexes <= indexes
 
     assert counts(conn) == {
-        "universe_membership": 0,
         "filings": 0,
         "filing_scores": 0,
         "filing_signals": 0,

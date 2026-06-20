@@ -4,20 +4,6 @@ import sqlite3
 from pathlib import Path
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS universe_membership (
-    cik          INTEGER,
-    ticker       TEXT NOT NULL,
-    as_of_date   TEXT NOT NULL,
-    sector       TEXT,
-    market_cap   REAL,
-    name         TEXT,
-    exchange     TEXT,
-    in_universe  INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (ticker, as_of_date)
-);
-CREATE INDEX IF NOT EXISTS idx_membership_cik  ON universe_membership(cik);
-CREATE INDEX IF NOT EXISTS idx_membership_date ON universe_membership(as_of_date);
-
 CREATE TABLE IF NOT EXISTS filings (
     accession         TEXT PRIMARY KEY,
     cik               INTEGER NOT NULL,
@@ -131,7 +117,7 @@ def counts(conn: sqlite3.Connection) -> dict[str, int]:
     cur = conn.cursor()
     out = {}
     for table in (
-        "universe_membership", "filings", "filing_scores", "filing_signals",
+        "filings", "filing_scores", "filing_signals",
         "sp500_membership", "sp500_aggregates",
     ):
         out[table] = cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]

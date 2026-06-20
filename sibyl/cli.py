@@ -19,8 +19,6 @@ from . import sections as sections_mod
 from . import sp500 as sp500_mod
 from .config import stack_clean
 
-STUB_COMMANDS = ("prices", "panel", "eval", "export")
-
 
 def _configure_logging(logs_dir: Path) -> None:
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -305,11 +303,6 @@ def cmd_queried(args: argparse.Namespace) -> int:
     return 2
 
 
-def cmd_stub(args: argparse.Namespace) -> int:
-    print(f"`sibyl {args.subcommand}` is not implemented yet (planned stage).", file=sys.stderr)
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sibyl", description="SEC filing signal research engine")
     parser.add_argument("--config", default="config.yaml", help="path to config.yaml")
@@ -442,10 +435,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("status", help="DB and disk counts")
     p_status.set_defaults(func=cmd_status)
-
-    for name in STUB_COMMANDS:
-        p = sub.add_parser(name, help=f"(stub) Stage for `{name}`; not implemented yet")
-        p.set_defaults(func=cmd_stub)
 
     return parser
 

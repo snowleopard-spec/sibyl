@@ -1,5 +1,13 @@
 # Sibyl — SEC Filing Signal Research Engine
 
+> **Historical spec.** This document describes the original signal-engine direction
+> (Phase 1 EDGAR pipeline → Phase 2 IC / backtest harness → Phase 3 Unicorn export).
+> Sibyl pivoted in 2026-06 to a research/comparison tool; see
+> [`RESEARCH_TOOL_SPEC.md`](RESEARCH_TOOL_SPEC.md) for the current product spec.
+> This file is kept for reference on the Layer-1 EDGAR pipeline modules
+> (download / parse / sections / score / diff / lm_dictionary) — those still
+> exist and are reused as the research tool's substrate.
+
 **Build specification for Claude Code.** This document is the source of truth for the project’s
 architecture and the intended build order. It is written to be detailed enough to implement from
 directly. Read the whole thing before writing code; the load-bearing decisions are in

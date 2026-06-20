@@ -451,7 +451,7 @@ def extract_all(
                     break
 
     conn.commit()
-    yoy = _apply_yoy_flags(conn, cfg.paths.clean)
+    yoy = _apply_yoy_flags(conn, clean_root)
     logger.info("yoy_jump flags applied: risk_factors=%d, mdna=%d",
                 yoy["risk_factors"], yoy["mdna"])
     return counts

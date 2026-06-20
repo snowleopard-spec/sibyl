@@ -345,15 +345,13 @@ def test_extract_all_workers_2_matches_workers_1(tmp_path, conn):
 
 
 def _make_cfg(tmp_path: Path):
-    from sibyl.config import Config, SecConfig, UnicornConfig, UniverseConfig, _resolve_paths
+    from sibyl.config import Config, SecConfig, UniverseConfig, _resolve_paths
     paths = _resolve_paths(tmp_path, None, None)
     for p in (paths.raw, paths.clean, paths.logs):
         p.mkdir(parents=True, exist_ok=True)
     return Config(
         paths=paths,
         sec=SecConfig(user_agent="ua x@x", rate_limit_per_sec=8),
-        unicorn=UnicornConfig(base_url="https://example", universe_path="/api/universe",
-                              expected_contract_version="1.0", token="t"),
         universe=UniverseConfig(form_types=["10-K"], include_amendments=False,
                                 history_start="2016-01-01"),
         download_gzip=True,

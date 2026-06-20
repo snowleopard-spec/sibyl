@@ -5,17 +5,11 @@ sec:
   user_agent: "Sibyl research your.name@email.com"
   rate_limit_per_sec: 8
 
-unicorn:
-  base_url: "https://<unicorn-host>"
-  universe_path: "/api/universe"
-  expected_contract_version: "1.0"
-
 universe:
-  file: ./data/universe.json
-  snapshots_dir: ./data/universe_snapshots
   form_types: ["10-K", "10-Q"]
   include_amendments: false
-  history_start: "2016-01-01"
+  # Rolling 5y from today. Update on each `sibyl sp500 refresh`.
+  history_start: "2021-06-20"
 
 download:
   gzip: true

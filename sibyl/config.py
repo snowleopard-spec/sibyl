@@ -15,14 +15,6 @@ class SecConfig:
 
 
 @dataclass(frozen=True)
-class UnicornConfig:
-    base_url: str
-    universe_path: str
-    expected_contract_version: str
-    token: str | None
-
-
-@dataclass(frozen=True)
 class UniverseConfig:
     form_types: list[str]
     include_amendments: bool
@@ -32,7 +24,7 @@ class UniverseConfig:
 @dataclass(frozen=True)
 class Paths:
     data_root: Path
-    # Stack-aware paths (canonical for the research tool).
+    # Stack-aware paths (canonical).
     sp500_raw: Path
     sp500_clean: Path
     sp500_record: Path
@@ -42,17 +34,13 @@ class Paths:
     queried_record: Path
     # Shared infra
     logs: Path
-    snapshots: Path
-    universe_json: Path
     db: Path
     company_tickers: Path
     lm_dictionary: Path
-    prices: Path
-    exports: Path
-    # Deprecated single-stack aliases. Kept temporarily so unmigrated callers
-    # (existing download/parse/sections/score/diff and their tests) keep working
-    # while the stack-aware refactor lands module-by-module. Aliased to sp500_*.
-    # Remove in the cleanup pass once no callers remain.
+    # Deprecated single-stack aliases — kept so the existing test fixtures
+    # in tests/test_{parse,sections,score,diff,download,config}.py continue
+    # to work. They point at sp500_raw / sp500_clean. Refactor those tests
+    # to use stack_raw/stack_clean and remove these in a follow-up.
     raw: Path
     clean: Path
 
@@ -88,15 +76,15 @@ def stack_record(cfg: "Config", stack: str) -> Path:
 class Config:
     paths: Paths
     sec: SecConfig
-    unicorn: UnicornConfig
     universe: UniverseConfig
     download_gzip: bool
 
 
-def _resolve_paths(data_root: Path, snapshots_override: str | None, universe_file_override: str | None) -> Paths:
+def _resolve_paths(data_root: Path, _snapshots_override=None, _universe_file_override=None) -> Paths:
+    """Build the canonical Paths object. The trailing args are accepted but
+    ignored for backwards compatibility with test helpers; they were used by
+    the pre-pivot Unicorn-endpoint flow."""
     data_root = data_root.resolve()
-    snapshots = Path(snapshots_override).resolve() if snapshots_override else data_root / "universe_snapshots"
-    universe_json = Path(universe_file_override).resolve() if universe_file_override else data_root / "universe.json"
     sp500_root = data_root / "sp500"
     queried_root = data_root / "queried"
     return Paths(
@@ -109,15 +97,10 @@ def _resolve_paths(data_root: Path, snapshots_override: str | None, universe_fil
         queried_clean=queried_root / "clean",
         queried_record=queried_root / "record.jsonl",
         logs=data_root / "logs",
-        snapshots=snapshots,
-        universe_json=universe_json,
         db=data_root / "sibyl.db",
         company_tickers=data_root / "company_tickers.json",
         lm_dictionary=data_root / "lm_master_dictionary.csv",
-        prices=data_root / "prices",
-        exports=data_root / "exports",
-        # Deprecated aliases — point at sp500 so legacy callers degrade to
-        # operating on the S&P stack. Will be removed in cleanup pass.
+        # Deprecated aliases.
         raw=sp500_root / "raw",
         clean=sp500_root / "clean",
     )
@@ -140,23 +123,13 @@ def load_config(config_path: str | os.PathLike[str] = "config.yaml", *, load_env
     if not data_root.is_absolute():
         data_root = (config_path.parent / data_root).resolve()
 
-    paths = _resolve_paths(
-        data_root,
-        raw.get("universe", {}).get("snapshots_dir"),
-        raw.get("universe", {}).get("file"),
-    )
+    paths = _resolve_paths(data_root)
 
     return Config(
         paths=paths,
         sec=SecConfig(
             user_agent=raw["sec"]["user_agent"],
             rate_limit_per_sec=int(raw["sec"]["rate_limit_per_sec"]),
-        ),
-        unicorn=UnicornConfig(
-            base_url=raw["unicorn"]["base_url"].rstrip("/"),
-            universe_path=raw["unicorn"]["universe_path"],
-            expected_contract_version=str(raw["unicorn"]["expected_contract_version"]),
-            token=os.environ.get("SIBYL_UNICORN_TOKEN"),
         ),
         universe=UniverseConfig(
             form_types=list(raw["universe"]["form_types"]),
@@ -176,9 +149,6 @@ def ensure_dirs(config: Config) -> None:
         config.paths.queried_raw,
         config.paths.queried_clean,
         config.paths.logs,
-        config.paths.snapshots,
-        config.paths.prices,
-        config.paths.exports,
     ):
         p.mkdir(parents=True, exist_ok=True)
     # Touch the record files so JSONL appenders never have to special-case
