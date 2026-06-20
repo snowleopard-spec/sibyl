@@ -88,6 +88,77 @@ def test_match_priors_does_not_cross_form_types(conn):
     assert priors == {"k21": "k20"}   # 10-Q does not link to or from 10-K
 
 
+# --- 10-Q same-quarter prior-year matching -----------------------------------
+
+def test_quarter_key_derives_calendar_quarter():
+    # Jan-Mar → Q1 (0); Apr-Jun → Q2 (1); Jul-Sep → Q2 (2); Oct-Dec → Q3 (3)
+    assert df._quarter_key("2024-01-15") == 0
+    assert df._quarter_key("2024-03-31") == 0
+    assert df._quarter_key("2024-04-01") == 1
+    assert df._quarter_key("2024-06-30") == 1
+    assert df._quarter_key("2024-07-01") == 2
+    assert df._quarter_key("2024-09-30") == 2
+    assert df._quarter_key("2024-12-31") == 3
+    assert df._quarter_key(None) == -1
+    assert df._quarter_key("garbage") == -1
+
+
+def test_match_key_10k_omits_quarter():
+    assert df._match_key(100, "10-K", "2024-12-31") == (100, "10-K")
+
+
+def test_match_key_10q_includes_quarter():
+    assert df._match_key(100, "10-Q", "2024-03-31") == (100, "10-Q", 0)
+    assert df._match_key(100, "10-Q", "2024-09-30") == (100, "10-Q", 2)
+
+
+def test_match_priors_10q_pairs_same_quarter_prior_year(conn):
+    """4 quarters of 10-Qs for CIK 100 across 2 years.
+    Q3 2024 should pair with Q3 2023, not Q2 2024."""
+    # Year 2023 Q1..Q3 (no Q4 — that becomes the 10-K).
+    _insert_filing(conn, "q23q1", 100, "10-Q", "2023-03-31", "2023-04-30")
+    _insert_filing(conn, "q23q2", 100, "10-Q", "2023-06-30", "2023-07-31")
+    _insert_filing(conn, "q23q3", 100, "10-Q", "2023-09-30", "2023-10-31")
+    # Year 2024 Q1..Q3.
+    _insert_filing(conn, "q24q1", 100, "10-Q", "2024-03-31", "2024-04-30")
+    _insert_filing(conn, "q24q2", 100, "10-Q", "2024-06-30", "2024-07-31")
+    _insert_filing(conn, "q24q3", 100, "10-Q", "2024-09-30", "2024-10-31")
+    conn.commit()
+    priors = df.match_prior_filings(conn)
+    assert priors == {
+        "q24q1": "q23q1",
+        "q24q2": "q23q2",
+        "q24q3": "q23q3",
+    }
+
+
+def test_match_priors_10q_does_not_pair_adjacent_quarters(conn):
+    """Q2 should not be Q1's prior, even though Q1 came first."""
+    _insert_filing(conn, "q24q1", 100, "10-Q", "2024-03-31", "2024-04-30")
+    _insert_filing(conn, "q24q2", 100, "10-Q", "2024-06-30", "2024-07-31")
+    conn.commit()
+    priors = df.match_prior_filings(conn)
+    # Neither has a same-quarter prior-year filing in the corpus.
+    assert priors == {}
+
+
+def test_match_priors_respects_stack(conn):
+    """Filings in different stacks must not pair with each other."""
+    _insert_filing(conn, "k_sp", 100, "10-K", "2023-12-31", "2024-01-15")
+    _insert_filing(conn, "k_qu", 100, "10-K", "2022-12-31", "2023-01-15")
+    conn.execute("UPDATE filings SET stack = 'queried' WHERE accession = 'k_qu'")
+    conn.commit()
+    # sp500 stack sees only k_sp (no prior); queried sees only k_qu (no prior).
+    assert df.match_prior_filings(conn, stack="sp500") == {}
+    assert df.match_prior_filings(conn, stack="queried") == {}
+
+
+def test_match_priors_rejects_unknown_stack(conn):
+    import pytest
+    with pytest.raises(ValueError, match="unknown stack"):
+        df.match_prior_filings(conn, stack="bogus")
+
+
 def test_match_priors_first_per_cik_has_no_prior(conn):
     _insert_filing(conn, "a", 100, "10-K", "2020-12-31", "2021-01-15")
     _insert_filing(conn, "b", 200, "10-K", "2020-12-31", "2021-01-15")

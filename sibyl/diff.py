@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import Config
+from .config import Config, VALID_STACKS
 from .parse import filing_clean_dir
 from .score import (
     SECTIONS,
@@ -42,16 +42,50 @@ class Counts:
 
 # --- Prior-filing matching ----------------------------------------------------
 
+def _quarter_key(period_of_report: str | None) -> int:
+    """Calendar quarter index (0..3) of an ISO YYYY-MM-DD period. -1 on unparseable."""
+    if not period_of_report or len(period_of_report) < 7:
+        return -1
+    try:
+        month = int(period_of_report[5:7])
+    except ValueError:
+        return -1
+    if 1 <= month <= 12:
+        return (month - 1) // 3
+    return -1
+
+
+def _match_key(cik: int, form_type: str, period_of_report: str | None) -> tuple:
+    """Grouping key for "same-period prior" matching.
+
+    - 10-K: (cik, form_type) — one annual filing per chain, immediately-previous
+      is always the same-period prior year.
+    - 10-Q: (cik, form_type, calendar_quarter) — Q3 2024 ↔ Q3 2023, never
+      Q3 2024 ↔ Q2 2024.
+    """
+    if form_type == "10-Q":
+        return (cik, form_type, _quarter_key(period_of_report))
+    return (cik, form_type)
+
+
 def match_prior_filings(
-    conn: sqlite3.Connection, *, ciks: list[int] | None = None
+    conn: sqlite3.Connection,
+    *,
+    stack: str = "sp500",
+    ciks: list[int] | None = None,
 ) -> dict[str, str]:
-    """For every parse_status='ok' filing, find the immediately-prior filing of
-    the same (cik, form_type) ordered by (period_of_report, acceptance_dt).
+    """For every parse_status='ok' filing in the given stack, find the
+    immediately-prior filing that matches by `_match_key`. For 10-K this
+    is the previous annual filing (same cik). For 10-Q this is the
+    same-fiscal-quarter prior-year filing.
+
     First filing per chain has no prior and is absent from the dict.
     """
+    if stack not in VALID_STACKS:
+        raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
     cur = conn.cursor()
-    where = ["parse_status = 'ok'"]
-    params: list = []
+    where = ["parse_status = 'ok'", "stack = ?"]
+    params: list = [stack]
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")
         params.extend(int(c) for c in ciks)
@@ -61,15 +95,18 @@ def match_prior_filings(
         f"ORDER BY cik, form_type, COALESCE(period_of_report, ''), acceptance_dt"
     )
     rows = list(cur.execute(sql, params))
-    prior: dict[str, str] = {}
-    last_key = (None, None)
-    last_acc: str | None = None
+
+    # Bucket by match_key, preserving period order within each bucket.
+    buckets: dict[tuple, list[str]] = {}
     for r in rows:
-        key = (r["cik"], r["form_type"])
-        if key == last_key and last_acc is not None:
-            prior[r["accession"]] = last_acc
-        last_key = key
-        last_acc = r["accession"]
+        key = _match_key(int(r["cik"]), r["form_type"], r["period_of_report"])
+        buckets.setdefault(key, []).append(r["accession"])
+
+    prior: dict[str, str] = {}
+    for accs in buckets.values():
+        # Each accession's prior is the immediately-earlier one in its bucket.
+        for i in range(1, len(accs)):
+            prior[accs[i]] = accs[i - 1]
     return prior
 
 
@@ -202,11 +239,12 @@ def _utc_now() -> str:
 def _select_targets(
     conn: sqlite3.Connection,
     *,
+    stack: str = "sp500",
     ciks: list[int] | None,
     force: bool,
 ) -> tuple[dict[str, str], int]:
     """Returns (dict[acc → prior_acc] for targets needing computation, skipped_count)."""
-    priors = match_prior_filings(conn, ciks=ciks)
+    priors = match_prior_filings(conn, stack=stack, ciks=ciks)
     if force:
         return priors, 0
     existing = {
@@ -242,31 +280,36 @@ def compute_all(
     conn: sqlite3.Connection,
     cfg: Config,
     *,
+    stack: str = "sp500",
     ciks: list[int] | None = None,
     limit: int | None = None,
     force: bool = False,
 ) -> Counts:
+    if stack not in VALID_STACKS:
+        raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
+    from .config import stack_clean
     counts = Counts()
-    targets, skipped = _select_targets(conn, ciks=ciks, force=force)
+    targets, skipped = _select_targets(conn, stack=stack, ciks=ciks, force=force)
     counts.skipped = skipped
 
     cur = conn.cursor()
-    where = ["parse_status = 'ok'"]
-    params: list = []
+    where = ["parse_status = 'ok'", "stack = ?"]
+    params: list = [stack]
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")
         params.extend(int(c) for c in ciks)
     total_eligible = cur.execute(
         f"SELECT COUNT(*) FROM filings WHERE {' AND '.join(where)}", params,
     ).fetchone()[0]
-    all_priors = match_prior_filings(conn, ciks=ciks)
+    all_priors = match_prior_filings(conn, stack=stack, ciks=ciks)
     counts.no_prior = total_eligible - len(all_priors)
+    clean_root = stack_clean(cfg, stack)
 
     if not targets:
         logger.info("Nothing to diff (skipped=%d, no_prior=%d).", skipped, counts.no_prior)
         return counts
 
-    logger.info("Pass 1: computing document frequencies...")
+    logger.info("Pass 1: computing document frequencies for stack=%s...", stack)
     df, n_docs = compute_doc_frequencies(conn, cfg, ciks=ciks)
     logger.info("DF table: %d unique tokens over %d documents.", len(df), n_docs)
 
@@ -283,7 +326,7 @@ def compute_all(
         try:
             rows = compute_filing_signals(
                 int(meta["cik"]), accession, prior_accession,
-                clean_root=cfg.paths.clean, conn=conn, df=df, n_docs=n_docs,
+                clean_root=clean_root, conn=conn, df=df, n_docs=n_docs,
             )
         except Exception as exc:
             logger.error("Diff failed for %s: %s", accession, exc)
