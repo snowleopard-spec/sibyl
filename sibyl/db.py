@@ -29,11 +29,38 @@ CREATE TABLE IF NOT EXISTS filings (
     primary_doc       TEXT,
     raw_path          TEXT NOT NULL,
     parse_status      TEXT,
+    stack             TEXT NOT NULL DEFAULT 'sp500',
     downloaded_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_filings_cik    ON filings(cik);
 CREATE INDEX IF NOT EXISTS idx_filings_form   ON filings(form_type);
 CREATE INDEX IF NOT EXISTS idx_filings_accept ON filings(acceptance_dt);
+-- NB: idx_filings_stack is created in init_schema() *after* _ensure_column adds
+-- the `stack` column, so it works for both fresh and legacy databases.
+
+CREATE TABLE IF NOT EXISTS sp500_membership (
+    ticker      TEXT PRIMARY KEY,
+    cik         INTEGER,
+    name        TEXT,
+    sector      TEXT,
+    weight_pct  REAL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sp500_membership_sector ON sp500_membership(sector);
+CREATE INDEX IF NOT EXISTS idx_sp500_membership_cik    ON sp500_membership(cik);
+
+CREATE TABLE IF NOT EXISTS sp500_aggregates (
+    as_of_date    TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    section       TEXT NOT NULL,
+    metric        TEXT NOT NULL,
+    mean_value    REAL,
+    median_value  REAL,
+    n_filings     INTEGER,
+    computed_at   TEXT,
+    PRIMARY KEY (as_of_date, scope, section, metric)
+);
+CREATE INDEX IF NOT EXISTS idx_sp500_agg_scope ON sp500_aggregates(scope, section, metric);
 
 CREATE TABLE IF NOT EXISTS filing_scores (
     accession      TEXT NOT NULL,
@@ -86,6 +113,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # Idempotent column-additions for older DBs created before a column existed.
     _ensure_column(conn, "filing_scores", "scorer_version", "TEXT NOT NULL DEFAULT '1'")
     _ensure_column(conn, "filing_signals", "diff_version", "TEXT NOT NULL DEFAULT '1'")
+    _ensure_column(conn, "filings", "stack", "TEXT NOT NULL DEFAULT 'sp500'")
+    # Created *after* the column-add so legacy DBs migrate cleanly.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_filings_stack ON filings(stack)")
     conn.commit()
 
 
@@ -100,6 +130,9 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str)
 def counts(conn: sqlite3.Connection) -> dict[str, int]:
     cur = conn.cursor()
     out = {}
-    for table in ("universe_membership", "filings", "filing_scores", "filing_signals"):
+    for table in (
+        "universe_membership", "filings", "filing_scores", "filing_signals",
+        "sp500_membership", "sp500_aggregates",
+    ):
         out[table] = cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     return out
