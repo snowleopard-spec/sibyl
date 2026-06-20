@@ -133,34 +133,78 @@ def test_upsert_membership_replaces_previous(conn):
 
 
 # ---------------- refresh_membership (integration; raw_bytes passed in) ------
+# Note: as of the wiki.py refactor, refresh_membership consumes Wikipedia HTML,
+# not the IVV CSV. The SAMPLE_IVV_CSV fixture is still used by the lower-level
+# parse_holdings/upsert_membership tests above (legacy IVV path kept for now).
+
+SAMPLE_WIKI_HTML = b"""
+<html><body>
+<table id="constituents" class="wikitable sortable">
+  <tr>
+    <th>Symbol</th><th>Security</th><th>GICSSector</th>
+    <th>GICS Sub-Industry</th><th>Headquarters Location</th>
+    <th>Date added</th><th>CIK</th><th>Founded</th>
+  </tr>
+  <tr><td>AAPL</td><td>Apple Inc.</td><td>Information Technology</td>
+      <td>Tech HW</td><td>Cupertino</td><td>1982-11-30</td>
+      <td>0000320193</td><td>1976</td></tr>
+  <tr><td>MSFT</td><td>Microsoft</td><td>Information Technology</td>
+      <td>Systems Software</td><td>Redmond</td><td>1994-06-01</td>
+      <td>0000789019</td><td>1975</td></tr>
+  <tr><td>BRK.B</td><td>Berkshire Hathaway</td><td>Financials</td>
+      <td>Multi-Sector Holdings</td><td>Omaha</td><td>2010-02-16</td>
+      <td>0001067983</td><td>1839</td></tr>
+  <tr><td>JPM</td><td>JPMorgan Chase</td><td>Financials</td>
+      <td>Diversified Banks</td><td>New York</td><td>1975-06-30</td>
+      <td>0000019617</td><td>1799</td></tr>
+  <tr><td>XYZUNKNOWN</td><td>Unknown Co</td><td>Energy</td>
+      <td>Integrated Oil &amp; Gas</td><td>Anytown</td><td>2024-01-01</td>
+      <td></td><td>2020</td></tr>
+</table>
+</body></html>
+"""
+
 
 def test_refresh_membership_end_to_end(cfg, conn):
-    _write_ticker_file(cfg, {"AAPL": 320193, "MSFT": 789019, "BRK-B": 1067983, "JPM": 19617})
+    # SEC ticker file is the *fallback* for any row whose Wikipedia CIK column
+    # is blank. Here only XYZUNKNOWN has a blank CIK; we deliberately don't
+    # put it in the SEC file so it stays unresolved.
+    _write_ticker_file(cfg, {"AAPL": 320193, "MSFT": 789019})
     holdings, cik_map, unresolved, snap = sp500.refresh_membership(
-        cfg, conn, raw_bytes=SAMPLE_IVV_CSV,
+        cfg, conn, raw_bytes=SAMPLE_WIKI_HTML,
     )
     assert len(holdings) == 5
+    # All four CIK'd rows come straight off Wikipedia.
     assert cik_map == {"AAPL": 320193, "MSFT": 789019, "BRK-B": 1067983, "JPM": 19617}
     assert unresolved == ["XYZUNKNOWN"]
     assert snap.exists()
+    assert snap.name.startswith("wiki_sp500_")
     n_rows = conn.execute("SELECT COUNT(*) FROM sp500_membership").fetchone()[0]
     assert n_rows == 5
 
 
 def test_members_with_ciks_excludes_unresolved(cfg, conn):
-    _write_ticker_file(cfg, {"AAPL": 320193, "MSFT": 789019, "BRK-B": 1067983, "JPM": 19617})
-    sp500.refresh_membership(cfg, conn, raw_bytes=SAMPLE_IVV_CSV)
+    sp500.refresh_membership(cfg, conn, raw_bytes=SAMPLE_WIKI_HTML)
     members = sp500.members_with_ciks(conn)
     tickers = {t for t, _, _ in members}
     assert "XYZUNKNOWN" not in tickers
     assert {"AAPL", "MSFT", "BRK-B", "JPM"} <= tickers
 
 
+def test_refresh_membership_falls_back_to_sec_ticker_file(cfg, conn):
+    """A blank Wikipedia CIK that the SEC file CAN resolve gets filled in."""
+    _write_ticker_file(cfg, {"XYZUNKNOWN": 999_999})
+    _, cik_map, unresolved, _ = sp500.refresh_membership(
+        cfg, conn, raw_bytes=SAMPLE_WIKI_HTML,
+    )
+    assert cik_map["XYZUNKNOWN"] == 999_999
+    assert unresolved == []
+
+
 # ---------------- status ----------------
 
 def test_status_reports_counts_and_sectors(cfg, conn):
-    _write_ticker_file(cfg, {"AAPL": 320193, "MSFT": 789019, "BRK-B": 1067983, "JPM": 19617})
-    sp500.refresh_membership(cfg, conn, raw_bytes=SAMPLE_IVV_CSV)
+    sp500.refresh_membership(cfg, conn, raw_bytes=SAMPLE_WIKI_HTML)
     stat = sp500.status(conn)
     assert stat["members"] == 5
     assert stat["members_with_cik"] == 4

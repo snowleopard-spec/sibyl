@@ -1,9 +1,14 @@
-"""S&P 500 universe acquisition from iShares' public IVV holdings CSV.
+"""S&P 500 universe acquisition.
 
-The CSV BlackRock publishes has a header stanza of fund metadata, then a
-blank line, then the holdings table. We snapshot each pull, parse the
-holdings, resolve tickers → CIKs, and upsert into the `sp500_membership`
-table. Used by the runner before any S&P filings are downloaded.
+Source: Wikipedia's `List_of_S&P_500_companies` page, via `sibyl/wiki.py`.
+The page is editor-maintained — index changes can lag by a few days vs
+the actual reconstitution. For a monthly-refresh research tool that's
+acceptable; Wikipedia also gives us GICS sectors + CIKs in one shot,
+which the IVV CSV did not.
+
+(Legacy IVV functions are kept below the membership orchestrator for now
+since they're harmless and may still be useful as a reference if/when
+BlackRock fixes their CSV endpoint. The cleanup pass can prune them.)
 
 Top-of-module flag `DOWNLOAD_MISSING_FILINGS` controls whether a refresh
 should also pull missing filings (per spec §5.1). The CLI exposes this
@@ -23,6 +28,7 @@ import requests
 
 from .config import Config
 from . import tickers as tickers_mod
+from . import wiki as wiki_mod
 
 logger = logging.getLogger(__name__)
 
@@ -160,29 +166,52 @@ def refresh_membership(
     *,
     raw_bytes: bytes | None = None,
 ) -> tuple[list[Holding], dict[str, int], list[str], Path]:
-    """End-to-end membership refresh:
-      1. Fetch live IVV CSV (or use the provided bytes for testing).
-      2. Snapshot to disk.
-      3. Parse holdings.
-      4. Resolve tickers → CIKs.
+    """End-to-end membership refresh, sourced from Wikipedia:
+      1. Fetch the Wikipedia constituents page (or use provided bytes for testing).
+      2. Snapshot the HTML to membership_snapshots/.
+      3. Parse the constituents table → ticker, name, sector, CIK.
+      4. Trust Wikipedia's CIK column where present; fall back to SEC's
+         company_tickers.json via tickers.resolve_many for any blanks.
       5. Upsert sp500_membership.
 
-    Returns (holdings, cik_map, unresolved_tickers, snapshot_path).
+    Returns (holdings, cik_map, unresolved_tickers, snapshot_path) — same
+    shape as the legacy IVV-based signature so callers don't need to change.
     """
-    bytes_ = raw_bytes if raw_bytes is not None else fetch_ivv_csv(user_agent=cfg.sec.user_agent)
-    snap = snapshot_csv(cfg, bytes_)
-    holdings = parse_holdings(bytes_)
-    logger.info("IVV holdings parsed: %d equity positions.", len(holdings))
+    bytes_ = (
+        raw_bytes if raw_bytes is not None
+        else wiki_mod.fetch_constituents_html(user_agent=cfg.sec.user_agent)
+    )
+    snap = wiki_mod.snapshot_html(bytes_, cfg.paths.sp500_snapshots)
+    members = wiki_mod.parse_constituents(bytes_)
+    logger.info("Wikipedia: parsed %d S&P 500 constituents.", len(members))
 
-    tickers_list = [h.ticker for h in holdings]
-    cik_map, unresolved = tickers_mod.resolve_many(cfg, tickers_list)
+    # Build cik_map: trust Wikipedia's CIK column first, fall back to SEC
+    # ticker file for any blanks (Wikipedia is mostly complete but not 100%).
+    cik_map: dict[str, int] = {}
+    needs_sec_lookup: list[str] = []
+    for m in members:
+        if m.cik is not None:
+            cik_map[m.ticker] = m.cik
+        else:
+            needs_sec_lookup.append(m.ticker)
+    if needs_sec_lookup:
+        resolved, _ = tickers_mod.resolve_many(cfg, needs_sec_lookup)
+        cik_map.update(resolved)
+    unresolved = [m.ticker for m in members if m.ticker not in cik_map]
     if unresolved:
         logger.warning(
             "Failed to resolve %d/%d tickers to CIK (kept in membership with NULL CIK): %s",
-            len(unresolved), len(tickers_list), ", ".join(unresolved[:10]) + (
-                " ..." if len(unresolved) > 10 else ""
-            ),
+            len(unresolved), len(members),
+            ", ".join(unresolved[:10]) + (" ..." if len(unresolved) > 10 else ""),
         )
+
+    # Adapt WikiMember → Holding so the upsert path is unchanged. Weight is
+    # 0.0 (Wikipedia doesn't carry weight; rank-by-weight queries should
+    # use an ETF source if needed later).
+    holdings = [
+        Holding(ticker=m.ticker, name=m.name, sector=m.sector, weight_pct=0.0)
+        for m in members
+    ]
     upsert_membership(conn, holdings, cik_map=cik_map)
     return holdings, cik_map, unresolved, snap
 
