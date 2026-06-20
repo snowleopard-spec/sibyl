@@ -132,7 +132,7 @@ def test_download_all_end_to_end(conn, tmp_path, submissions, monkeypatch):
     assert all(r["form_type"] == "10-K" for r in db_rows)
     # raw_path stored relative to data_root
     for r in db_rows:
-        assert r["raw_path"].startswith("raw/320193/")
+        assert r["raw_path"].startswith("sp500/raw/320193/")
     # log file written
     assert (cfg.paths.logs / "downloaded.txt").exists()
     assert (cfg.paths.logs / "downloaded.txt").read_text().count("\n") == 2
@@ -155,7 +155,7 @@ def test_resumability_skips_complete_filings(conn, tmp_path, submissions):
     (folder / "metadata.json").write_text("{}")
     conn.execute(
         "INSERT INTO filings(accession, cik, form_type, acceptance_dt, raw_path, downloaded_at) "
-        "VALUES (?, ?, '10-K', '2023-11-02T18:08:38Z', 'raw/320193/%s/primary.html.gz', '2026-06-13T00:00:00Z')" % acc_done,
+        "VALUES (?, ?, '10-K', '2023-11-02T18:08:38Z', 'sp500/raw/320193/%s/primary.html.gz', '2026-06-13T00:00:00Z')" % acc_done,
         (acc_done, cik),
     )
     conn.commit()
@@ -242,21 +242,8 @@ def test_submissions_url():
 
 def _make_cfg(tmp_path: Path):
     """Build a minimal Config object pointing at tmp_path."""
-    from sibyl.config import Config, Paths, SecConfig, UnicornConfig, UniverseConfig
-    data_root = tmp_path
-    paths = Paths(
-        data_root=data_root,
-        raw=data_root / "raw",
-        clean=data_root / "clean",
-        logs=data_root / "logs",
-        snapshots=data_root / "universe_snapshots",
-        universe_json=data_root / "universe.json",
-        db=data_root / "sibyl.db",
-        company_tickers=data_root / "company_tickers.json",
-        lm_dictionary=data_root / "lm_master_dictionary.csv",
-        prices=data_root / "prices",
-        exports=data_root / "exports",
-    )
+    from sibyl.config import Config, SecConfig, UnicornConfig, UniverseConfig, _resolve_paths
+    paths = _resolve_paths(tmp_path, None, None)
     for p in (paths.raw, paths.logs):
         p.mkdir(parents=True, exist_ok=True)
     return Config(

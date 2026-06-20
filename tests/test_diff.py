@@ -124,14 +124,11 @@ def _write_filing_files(clean_root, cik, accession, *, full, rf, mdna):
 @pytest.fixture
 def two_year_corpus(tmp_path, conn):
     """Two 10-Ks for CIK 100: 2020 + 2021."""
-    from sibyl.config import Config, Paths, SecConfig, UnicornConfig, UniverseConfig
-    paths = Paths(
-        data_root=tmp_path, raw=tmp_path / "raw", clean=tmp_path / "clean",
-        logs=tmp_path / "logs", snapshots=tmp_path / "snapshots",
-        universe_json=tmp_path / "universe.json", db=tmp_path / "sibyl.db",
-        company_tickers=tmp_path / "company_tickers.json",
+    from dataclasses import replace
+    from sibyl.config import Config, SecConfig, UnicornConfig, UniverseConfig, _resolve_paths
+    paths = replace(
+        _resolve_paths(tmp_path, None, None),
         lm_dictionary=tmp_path / "lm.csv",
-        prices=tmp_path / "prices", exports=tmp_path / "exports",
     )
     cfg = Config(
         paths=paths,

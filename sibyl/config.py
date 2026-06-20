@@ -32,8 +32,15 @@ class UniverseConfig:
 @dataclass(frozen=True)
 class Paths:
     data_root: Path
-    raw: Path
-    clean: Path
+    # Stack-aware paths (canonical for the research tool).
+    sp500_raw: Path
+    sp500_clean: Path
+    sp500_record: Path
+    sp500_snapshots: Path
+    queried_raw: Path
+    queried_clean: Path
+    queried_record: Path
+    # Shared infra
     logs: Path
     snapshots: Path
     universe_json: Path
@@ -42,6 +49,39 @@ class Paths:
     lm_dictionary: Path
     prices: Path
     exports: Path
+    # Deprecated single-stack aliases. Kept temporarily so unmigrated callers
+    # (existing download/parse/sections/score/diff and their tests) keep working
+    # while the stack-aware refactor lands module-by-module. Aliased to sp500_*.
+    # Remove in the cleanup pass once no callers remain.
+    raw: Path
+    clean: Path
+
+
+VALID_STACKS = ("sp500", "queried")
+
+
+def stack_raw(cfg: "Config", stack: str) -> Path:
+    if stack == "sp500":
+        return cfg.paths.sp500_raw
+    if stack == "queried":
+        return cfg.paths.queried_raw
+    raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
+
+
+def stack_clean(cfg: "Config", stack: str) -> Path:
+    if stack == "sp500":
+        return cfg.paths.sp500_clean
+    if stack == "queried":
+        return cfg.paths.queried_clean
+    raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
+
+
+def stack_record(cfg: "Config", stack: str) -> Path:
+    if stack == "sp500":
+        return cfg.paths.sp500_record
+    if stack == "queried":
+        return cfg.paths.queried_record
+    raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
 
 
 @dataclass(frozen=True)
@@ -57,10 +97,17 @@ def _resolve_paths(data_root: Path, snapshots_override: str | None, universe_fil
     data_root = data_root.resolve()
     snapshots = Path(snapshots_override).resolve() if snapshots_override else data_root / "universe_snapshots"
     universe_json = Path(universe_file_override).resolve() if universe_file_override else data_root / "universe.json"
+    sp500_root = data_root / "sp500"
+    queried_root = data_root / "queried"
     return Paths(
         data_root=data_root,
-        raw=data_root / "raw",
-        clean=data_root / "clean",
+        sp500_raw=sp500_root / "raw",
+        sp500_clean=sp500_root / "clean",
+        sp500_record=sp500_root / "record.jsonl",
+        sp500_snapshots=sp500_root / "membership_snapshots",
+        queried_raw=queried_root / "raw",
+        queried_clean=queried_root / "clean",
+        queried_record=queried_root / "record.jsonl",
         logs=data_root / "logs",
         snapshots=snapshots,
         universe_json=universe_json,
@@ -69,6 +116,10 @@ def _resolve_paths(data_root: Path, snapshots_override: str | None, universe_fil
         lm_dictionary=data_root / "lm_master_dictionary.csv",
         prices=data_root / "prices",
         exports=data_root / "exports",
+        # Deprecated aliases — point at sp500 so legacy callers degrade to
+        # operating on the S&P stack. Will be removed in cleanup pass.
+        raw=sp500_root / "raw",
+        clean=sp500_root / "clean",
     )
 
 
@@ -119,11 +170,19 @@ def load_config(config_path: str | os.PathLike[str] = "config.yaml", *, load_env
 def ensure_dirs(config: Config) -> None:
     for p in (
         config.paths.data_root,
-        config.paths.raw,
-        config.paths.clean,
+        config.paths.sp500_raw,
+        config.paths.sp500_clean,
+        config.paths.sp500_snapshots,
+        config.paths.queried_raw,
+        config.paths.queried_clean,
         config.paths.logs,
         config.paths.snapshots,
         config.paths.prices,
         config.paths.exports,
     ):
         p.mkdir(parents=True, exist_ok=True)
+    # Touch the record files so JSONL appenders never have to special-case
+    # first-run.
+    for rec in (config.paths.sp500_record, config.paths.queried_record):
+        rec.parent.mkdir(parents=True, exist_ok=True)
+        rec.touch(exist_ok=True)

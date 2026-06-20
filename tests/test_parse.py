@@ -237,21 +237,8 @@ def test_pick_samples_excludes_suspicious_by_default(tmp_path, fixture_html, con
 # --- helpers ---
 
 def _make_cfg(tmp_path: Path):
-    from sibyl.config import Config, Paths, SecConfig, UnicornConfig, UniverseConfig
-    data_root = tmp_path
-    paths = Paths(
-        data_root=data_root,
-        raw=data_root / "raw",
-        clean=data_root / "clean",
-        logs=data_root / "logs",
-        snapshots=data_root / "universe_snapshots",
-        universe_json=data_root / "universe.json",
-        db=data_root / "sibyl.db",
-        company_tickers=data_root / "company_tickers.json",
-        lm_dictionary=data_root / "lm_master_dictionary.csv",
-        prices=data_root / "prices",
-        exports=data_root / "exports",
-    )
+    from sibyl.config import Config, SecConfig, UnicornConfig, UniverseConfig, _resolve_paths
+    paths = _resolve_paths(tmp_path, None, None)
     for p in (paths.raw, paths.clean, paths.logs):
         p.mkdir(parents=True, exist_ok=True)
     return Config(
