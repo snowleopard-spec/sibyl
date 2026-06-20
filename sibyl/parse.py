@@ -199,35 +199,35 @@ def parse_all(
     conn: sqlite3.Connection,
     cfg: Config,
     *,
+    stack: str = "sp500",
     ciks: list[int] | None = None,
     limit: int | None = None,
     force: bool = False,
 ) -> Counts:
+    from .config import VALID_STACKS, stack_clean, stack_raw
+    if stack not in VALID_STACKS:
+        raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
+    raw_root = stack_raw(cfg, stack)
+    clean_root = stack_clean(cfg, stack)
+
     counts = Counts()
     cur = conn.cursor()
-    where = []
-    params: list = []
+    where = ["stack = ?"]
+    params: list = [stack]
     if not force:
         where.append("(parse_status IS NULL)")
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")
         params.extend(int(c) for c in ciks)
-    sql = "SELECT accession, cik FROM filings"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY cik, accession"
+    sql = "SELECT accession, cik FROM filings WHERE " + " AND ".join(where) + " ORDER BY cik, accession"
     rows = list(cur.execute(sql, params))
-
-    if force and ciks:
-        # When --force + --cik, we already restricted by cik; nothing else to do.
-        pass
 
     total = len(rows)
     for idx, r in enumerate(rows, start=1):
         accession = r["accession"]
         cik = int(r["cik"])
         try:
-            sections = parse_filing(cik, accession, raw_root=cfg.paths.raw, clean_root=cfg.paths.clean)
+            sections = parse_filing(cik, accession, raw_root=raw_root, clean_root=clean_root)
         except Exception as exc:  # defensive; parse_filing already catches
             logger.error("Unexpected parse error CIK %s acc %s: %s", cik, accession, exc)
             counts.failed += 1
