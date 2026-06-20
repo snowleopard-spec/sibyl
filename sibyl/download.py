@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from . import edgar
-from .config import Config
+from .config import Config, VALID_STACKS, stack_raw
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +229,7 @@ def insert_filing(
     row: FilingRow,
     raw_path: Path,
     data_root: Path,
+    stack: str = "sp500",
 ) -> None:
     try:
         rel_path = raw_path.relative_to(data_root)
@@ -238,8 +239,8 @@ def insert_filing(
         """
         INSERT OR IGNORE INTO filings
             (accession, cik, ticker, form_type, period_of_report, acceptance_dt,
-             filing_date, primary_doc, raw_path, downloaded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             filing_date, primary_doc, raw_path, stack, downloaded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row.accession,
@@ -251,42 +252,52 @@ def insert_filing(
             row.filing_date,
             row.primary_doc,
             str(rel_path),
+            stack,
             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         ),
     )
     conn.commit()
 
 
-def _select_targets(conn: sqlite3.Connection, ciks: list[int] | None) -> list[tuple[int, str | None]]:
-    """Return [(cik, ticker), ...] from the latest as_of_date in universe_membership.
+def _select_targets(
+    conn: sqlite3.Connection,
+    ciks: list[int] | None,
+    *,
+    stack: str = "sp500",
+) -> list[tuple[int, str | None]]:
+    """Return [(cik, ticker), ...] targets for the given stack.
 
-    If `ciks` is provided, use those CIKs explicitly (ticker looked up from any
-    membership row), regardless of latest-snapshot membership.
+    For the `sp500` stack, the universe = current sp500_membership rows
+    with non-NULL CIK. For the `queried` stack, callers must pass explicit
+    `ciks` (there is no implicit "queried universe"); calling with
+    ciks=None on the queried stack returns [].
+
+    Explicit `ciks` always wins: ticker is looked up from sp500_membership
+    where possible, otherwise NULL.
     """
     cur = conn.cursor()
     if ciks:
         out: list[tuple[int, str | None]] = []
         for cik in ciks:
             r = cur.execute(
-                "SELECT ticker FROM universe_membership WHERE cik = ? "
-                "ORDER BY as_of_date DESC LIMIT 1",
+                "SELECT ticker FROM sp500_membership WHERE cik = ? LIMIT 1",
                 (int(cik),),
             ).fetchone()
             out.append((int(cik), r["ticker"] if r else None))
         return out
 
-    latest = cur.execute("SELECT MAX(as_of_date) FROM universe_membership").fetchone()[0]
-    if not latest:
+    if stack == "sp500":
+        return [
+            (int(r["cik"]), r["ticker"])
+            for r in cur.execute(
+                "SELECT cik, ticker FROM sp500_membership "
+                "WHERE cik IS NOT NULL ORDER BY ticker"
+            )
+        ]
+    if stack == "queried":
+        # Queried stack has no implicit universe — caller must specify ciks.
         return []
-    return [
-        (int(r["cik"]), r["ticker"])
-        for r in cur.execute(
-            "SELECT cik, ticker FROM universe_membership "
-            "WHERE as_of_date = ? AND cik IS NOT NULL "
-            "ORDER BY ticker",
-            (latest,),
-        )
-    ]
+    raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
 
 
 def _append_downloaded_log(logs_dir: Path, accession: str) -> None:
@@ -299,13 +310,29 @@ def download_all(
     conn: sqlite3.Connection,
     cfg: Config,
     *,
+    stack: str = "sp500",
     ciks: list[int] | None = None,
     limit: int | None = None,
     refresh_submissions: bool = False,
 ) -> Counts:
-    targets = _select_targets(conn, ciks)
+    """Download missing 10-K/10-Q filings for a stack.
+
+    For `stack='sp500'` with no explicit `ciks`, targets are the current
+    sp500_membership. For `stack='queried'`, an explicit `ciks` list is
+    required (queried stack has no implicit universe).
+    """
+    if stack not in VALID_STACKS:
+        raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
+    raw_root = stack_raw(cfg, stack)
+    targets = _select_targets(conn, ciks, stack=stack)
     if not targets:
-        logger.warning("No CIKs to download (universe_membership empty?). Run `sibyl universe` first.")
+        if stack == "sp500":
+            logger.warning(
+                "No CIKs to download for sp500 stack (sp500_membership empty?). "
+                "Run `sibyl sp500 refresh` first."
+            )
+        else:
+            logger.warning("No CIKs supplied for queried stack — nothing to download.")
         return Counts()
 
     limiter = edgar.RateLimiter(cfg.sec.rate_limit_per_sec)
@@ -318,7 +345,7 @@ def download_all(
                 cik,
                 limiter=limiter,
                 user_agent=cfg.sec.user_agent,
-                raw_root=cfg.paths.raw,
+                raw_root=raw_root,
                 refresh=refresh_submissions,
             )
             extras = fetch_filings_files(
@@ -326,7 +353,7 @@ def download_all(
                 cik=cik,
                 limiter=limiter,
                 user_agent=cfg.sec.user_agent,
-                raw_root=cfg.paths.raw,
+                raw_root=raw_root,
                 refresh=refresh_submissions,
             )
         except Exception as exc:
@@ -340,13 +367,13 @@ def download_all(
             history_start=cfg.universe.history_start,
             include_amendments=cfg.universe.include_amendments,
         ):
-            if is_filing_complete(conn, cfg.paths.raw, cik, row.accession):
+            if is_filing_complete(conn, raw_root, cik, row.accession):
                 counts.skipped += 1
                 continue
             try:
                 doc_path = download_filing(
                     cik, row,
-                    raw_root=cfg.paths.raw,
+                    raw_root=raw_root,
                     limiter=limiter,
                     user_agent=cfg.sec.user_agent,
                     gzip_compress=cfg.download_gzip,
@@ -355,6 +382,7 @@ def download_all(
                     conn,
                     cik=cik, ticker=ticker, row=row,
                     raw_path=doc_path, data_root=cfg.paths.data_root,
+                    stack=stack,
                 )
                 _append_downloaded_log(cfg.paths.logs, row.accession)
                 counts.new_filings += 1

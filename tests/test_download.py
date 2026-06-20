@@ -97,9 +97,9 @@ def test_download_filing_writes_files_atomically(tmp_path):
 def test_download_all_end_to_end(conn, tmp_path, submissions, monkeypatch):
     cik = 320193
     conn.execute(
-        "INSERT INTO universe_membership(cik, ticker, as_of_date, in_universe) "
-        "VALUES (?, ?, ?, 1)",
-        (cik, "AAPL", "2026-06-11"),
+        "INSERT INTO sp500_membership(ticker, cik, name, sector, weight_pct, updated_at) "
+        "VALUES (?, ?, 'Apple', 'Information Technology', 3.0, ?)",
+        ("AAPL", cik, "2026-06-11"),
     )
     conn.commit()
 
@@ -142,8 +142,8 @@ def test_download_all_end_to_end(conn, tmp_path, submissions, monkeypatch):
 def test_resumability_skips_complete_filings(conn, tmp_path, submissions):
     cik = 320193
     conn.execute(
-        "INSERT INTO universe_membership(cik, ticker, as_of_date, in_universe) "
-        "VALUES (?, ?, ?, 1)", (cik, "AAPL", "2026-06-11"),
+        "INSERT INTO sp500_membership(ticker, cik, name, sector, weight_pct, updated_at) "
+        "VALUES (?, ?, 'Apple', 'Information Technology', 3.0, ?)", ("AAPL", cik, "2026-06-11"),
     )
     conn.commit()
 
@@ -177,8 +177,8 @@ def test_resumability_skips_complete_filings(conn, tmp_path, submissions):
 def test_resumability_redownloads_orphan_files(conn, tmp_path, submissions):
     cik = 320193
     conn.execute(
-        "INSERT INTO universe_membership(cik, ticker, as_of_date, in_universe) "
-        "VALUES (?, ?, ?, 1)", (cik, "AAPL", "2026-06-11"),
+        "INSERT INTO sp500_membership(ticker, cik, name, sector, weight_pct, updated_at) "
+        "VALUES (?, ?, 'Apple', 'Information Technology', 3.0, ?)", ("AAPL", cik, "2026-06-11"),
     )
     conn.commit()
 
@@ -236,6 +236,54 @@ def test_archives_doc_url():
 
 def test_submissions_url():
     assert edgar.submissions_url(320193) == "https://data.sec.gov/submissions/CIK0000320193.json"
+
+
+# --- stack-awareness ---------------------------------------------------------
+
+def test_select_targets_sp500_stack(conn):
+    """sp500 stack with no explicit ciks reads from sp500_membership."""
+    conn.execute(
+        "INSERT INTO sp500_membership(ticker, cik, name, sector, weight_pct, updated_at) "
+        "VALUES ('AAPL', 320193, 'Apple', 'IT', 3.0, '2026-06-20'), "
+        "       ('MSFT', 789019, 'Microsoft', 'IT', 2.5, '2026-06-20')"
+    )
+    conn.commit()
+    from sibyl.download import _select_targets
+    targets = _select_targets(conn, None, stack="sp500")
+    assert sorted(t[0] for t in targets) == [320193, 789019]
+
+
+def test_select_targets_queried_stack_requires_ciks(conn):
+    """queried stack without explicit ciks returns empty (no implicit universe)."""
+    from sibyl.download import _select_targets
+    assert _select_targets(conn, None, stack="queried") == []
+    assert _select_targets(conn, [320193], stack="queried") == [(320193, None)]
+
+
+def test_select_targets_rejects_unknown_stack(conn):
+    import pytest
+    from sibyl.download import _select_targets
+    with pytest.raises(ValueError, match="unknown stack"):
+        _select_targets(conn, None, stack="bogus")
+
+
+def test_insert_filing_writes_stack_column(conn, tmp_path):
+    """Verify the stack column is populated correctly per the stack arg."""
+    from sibyl.download import FilingRow, insert_filing
+    row = FilingRow(
+        accession="x-23-1", form_type="10-K", filing_date="2023-01-01",
+        acceptance_dt="2023-01-01T00:00:00Z", period_of_report="2022-12-31",
+        primary_doc="primary.htm",
+    )
+    raw_path = tmp_path / "queried" / "raw" / "100" / "x-23-1" / "primary.html.gz"
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.touch()
+    insert_filing(
+        conn, cik=100, ticker="ZZZ", row=row, raw_path=raw_path,
+        data_root=tmp_path, stack="queried",
+    )
+    got = conn.execute("SELECT stack FROM filings WHERE accession = ?", ("x-23-1",)).fetchone()
+    assert got["stack"] == "queried"
 
 
 # --- helpers ---
