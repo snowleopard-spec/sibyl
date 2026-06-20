@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Iterable
 
 import edgar
-from edgar.company_reports import TenK
+from edgar.company_reports import TenK, TenQ
 
-from .config import Config
+from .config import Config, stack_clean, stack_raw
 from .parse import filing_clean_dir
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,13 @@ INCORP_REF_RE = re.compile(
 # Applied to MDNA only; risk_factors can be legitimately tiny for shell / smaller-reporting filers.
 MDNA_MIN_REAL_WORDS = 100
 
+# 10-Q risk factors are typically a 1-3 sentence "no material changes from our
+# 10-K" placeholder. That short text *is* the section and is itself a signal
+# (any quarter where it grows = an update worth attention). Don't flag short.
+MIN_OK_WORDS_10Q_RF = 0
+
 SECTIONS = ("risk_factors", "mdna")
+SUPPORTED_FORM_TYPES = ("10-K", "10-Q")
 
 
 @dataclass
@@ -59,9 +65,9 @@ class Counts:
 class LocalFiling(edgar.Filing):
     """Bypass edgartools' network fetch by reading raw HTML from our local cache."""
 
-    def __init__(self, *, cik: int, accession: str, html_path: Path):
+    def __init__(self, *, cik: int, accession: str, html_path: Path, form_type: str = "10-K"):
         super().__init__(
-            cik=int(cik), company="X", form="10-K",
+            cik=int(cik), company="X", form=form_type,
             filing_date="2023-01-01", accession_no=accession,
         )
         self._html_path = Path(html_path)
@@ -83,7 +89,28 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp_path.replace(path)
 
 
-def _section_status(text: str | None, *, full_word_count: int, hard_floor: int = 0) -> tuple[str, dict]:
+def _extract_via_edgartools(filing: "LocalFiling", form_type: str) -> tuple[str, str]:
+    """Dispatch on form_type → (risk_factors_text, mdna_text).
+
+    10-K: TenK.risk_factors / .management_discussion (Item 1A, Item 7).
+    10-Q: TenQ.get_item_with_part('Part II', 'Item 1A') for RF;
+          TenQ.get_item_with_part('Part I', 'Item 2') for MD&A.
+    """
+    if form_type == "10-K":
+        report = TenK(filing)
+        return (report.risk_factors or "", report.management_discussion or "")
+    if form_type == "10-Q":
+        report = TenQ(filing)
+        rf = report.get_item_with_part("Part II", "Item 1A", markdown=False) or ""
+        mdna = report.get_item_with_part("Part I", "Item 2", markdown=False) or ""
+        return (rf, mdna)
+    raise ValueError(
+        f"unsupported form_type {form_type!r}; expected one of {SUPPORTED_FORM_TYPES}"
+    )
+
+
+def _section_status(text: str | None, *, full_word_count: int, hard_floor: int = 0,
+                    min_ok_words: int = MIN_OK_WORDS) -> tuple[str, dict]:
     """Return (status, info_dict). info_dict has word_count, char_count, flags, head_excerpt.
 
     `hard_floor`: if word_count < this, return status='missing' regardless of other
@@ -126,7 +153,7 @@ def _section_status(text: str | None, *, full_word_count: int, hard_floor: int =
             "suspicious_flags": flags, "head_excerpt": text[:300],
         }
 
-    if word_count < MIN_OK_WORDS:
+    if word_count < min_ok_words:
         flags.append("length_low")
 
     return "ok", {
@@ -141,8 +168,17 @@ def extract_sections(
     *,
     raw_root: Path,
     clean_root: Path,
+    form_type: str = "10-K",
 ) -> dict:
-    """Run edgartools section extraction on one filing. Returns the merged sections.json dict."""
+    """Run edgartools section extraction on one filing. Returns the merged sections.json dict.
+
+    form_type dispatches to the right edgartools report class (TenK or TenQ).
+    For 10-Q the RF section is allowed to be tiny ("no material changes...").
+    """
+    if form_type not in SUPPORTED_FORM_TYPES:
+        raise ValueError(
+            f"unsupported form_type {form_type!r}; expected one of {SUPPORTED_FORM_TYPES}"
+        )
     raw_path = raw_root / str(int(cik)) / accession / "primary.html.gz"
     out_dir = filing_clean_dir(clean_root, cik, accession)
     sections_path = out_dir / "sections.json"
@@ -156,6 +192,7 @@ def extract_sections(
         # Should be impossible since Stage 2 succeeded, but defend.
         sections["section_extractor_version"] = EXTRACTOR_VERSION
         sections["extractor"] = EXTRACTOR_NAME
+        sections["form_type"] = form_type
         sections["risk_factors"] = {"status": "missing", "word_count": 0, "char_count": 0,
                                     "suspicious_flags": ["raw_missing"], "head_excerpt": ""}
         sections["mdna"] = {"status": "missing", "word_count": 0, "char_count": 0,
@@ -167,17 +204,21 @@ def extract_sections(
     full_word_count = (sections.get("full") or {}).get("word_count", 0)
 
     try:
-        filing = LocalFiling(cik=cik, accession=accession, html_path=raw_path)
-        tenk = TenK(filing)
-        rf_text = tenk.risk_factors or ""
-        mdna_text = tenk.management_discussion or ""
+        filing = LocalFiling(cik=cik, accession=accession, html_path=raw_path, form_type=form_type)
+        rf_text, mdna_text = _extract_via_edgartools(filing, form_type)
     except Exception as exc:
-        logger.warning("extractor crashed on %s/%s: %s", cik, accession, exc)
+        logger.warning("extractor crashed on %s/%s (%s): %s", cik, accession, form_type, exc)
         rf_text = ""
         mdna_text = ""
 
-    rf_status, rf_info = _section_status(rf_text, full_word_count=full_word_count)
-    mdna_status, mdna_info = _section_status(mdna_text, full_word_count=full_word_count, hard_floor=MDNA_MIN_REAL_WORDS)
+    # 10-Q RFs are often a single sentence — don't flag length_low.
+    rf_min = MIN_OK_WORDS_10Q_RF if form_type == "10-Q" else MIN_OK_WORDS
+    rf_status, rf_info = _section_status(
+        rf_text, full_word_count=full_word_count, min_ok_words=rf_min,
+    )
+    mdna_status, mdna_info = _section_status(
+        mdna_text, full_word_count=full_word_count, hard_floor=MDNA_MIN_REAL_WORDS,
+    )
 
     if rf_status == "ok":
         _atomic_write_text(out_dir / "risk_factors.txt", rf_text)
@@ -186,6 +227,7 @@ def extract_sections(
 
     sections["section_extractor_version"] = EXTRACTOR_VERSION
     sections["extractor"] = EXTRACTOR_NAME
+    sections["form_type"] = form_type
     sections["risk_factors"] = {"status": rf_status, **rf_info}
     sections["mdna"] = {"status": mdna_status, **mdna_info}
 
@@ -257,14 +299,15 @@ def _silence_edgartools() -> None:
     logging.getLogger("edgar").setLevel(logging.WARNING)
 
 
-def _extract_worker(args: tuple[int, str, str, str]) -> dict:
+def _extract_worker(args: tuple[int, str, str, str, str]) -> dict:
     """Pure-function task run in a worker process. No DB, no shared state."""
-    cik, accession, raw_root_str, clean_root_str = args
+    cik, accession, raw_root_str, clean_root_str, form_type = args
     try:
         sec = extract_sections(
             cik, accession,
             raw_root=Path(raw_root_str),
             clean_root=Path(clean_root_str),
+            form_type=form_type,
         )
         suspicious = any((sec.get(s) or {}).get("suspicious_flags") for s in SECTIONS)
         return {
@@ -286,27 +329,36 @@ def _select_targets(
     conn: sqlite3.Connection,
     cfg: Config,
     *,
+    stack: str = "sp500",
     ciks: list[int] | None = None,
     force: bool = False,
-) -> tuple[list[tuple[int, str]], int]:
-    """Pre-filter: return ([(cik, accession), ...], skipped_count). Skipped = already
-    at current EXTRACTOR_VERSION."""
+) -> tuple[list[tuple[int, str, str]], int]:
+    """Pre-filter: return ([(cik, accession, form_type), ...], skipped_count).
+    Skipped = already at current EXTRACTOR_VERSION."""
     cur = conn.cursor()
-    where = ["parse_status = 'ok'"]
-    params: list = []
+    where = ["parse_status = 'ok'", "stack = ?"]
+    params: list = [stack]
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")
         params.extend(int(c) for c in ciks)
-    sql = f"SELECT cik, accession FROM filings WHERE {' AND '.join(where)} ORDER BY cik, accession"
+    sql = (
+        f"SELECT cik, accession, form_type FROM filings "
+        f"WHERE {' AND '.join(where)} ORDER BY cik, accession"
+    )
     rows = list(cur.execute(sql, params))
+    clean_root = stack_clean(cfg, stack)
 
-    targets: list[tuple[int, str]] = []
+    targets: list[tuple[int, str, str]] = []
     skipped = 0
     for r in rows:
         cik = int(r["cik"])
         accession = r["accession"]
+        form_type = r["form_type"]
+        if form_type not in SUPPORTED_FORM_TYPES:
+            # Skip silently — we only support 10-K and 10-Q.
+            continue
         if not force:
-            sections_path = filing_clean_dir(cfg.paths.clean, cik, accession) / "sections.json"
+            sections_path = filing_clean_dir(clean_root, cik, accession) / "sections.json"
             if sections_path.exists():
                 try:
                     existing = json.loads(sections_path.read_text())
@@ -315,7 +367,7 @@ def _select_targets(
                         continue
                 except Exception:
                     pass
-        targets.append((cik, accession))
+        targets.append((cik, accession, form_type))
     return targets, skipped
 
 
@@ -323,19 +375,22 @@ def extract_all(
     conn: sqlite3.Connection,
     cfg: Config,
     *,
+    stack: str = "sp500",
     ciks: list[int] | None = None,
     limit: int | None = None,
     force: bool = False,
     workers: int | None = None,
 ) -> Counts:
     counts = Counts()
-    targets, skipped = _select_targets(conn, cfg, ciks=ciks, force=force)
+    targets, skipped = _select_targets(conn, cfg, stack=stack, ciks=ciks, force=force)
     counts.skipped = skipped
     total = len(targets)
+    raw_root = stack_raw(cfg, stack)
+    clean_root = stack_clean(cfg, stack)
 
     if total == 0:
         logger.info("Nothing to extract (skipped=%d, no targets at current version).", skipped)
-        yoy = _apply_yoy_flags(conn, cfg.paths.clean)
+        yoy = _apply_yoy_flags(conn, clean_root)
         logger.info("yoy_jump flags applied: risk_factors=%d, mdna=%d",
                     yoy["risk_factors"], yoy["mdna"])
         return counts
@@ -343,7 +398,7 @@ def extract_all(
     workers = workers if workers is not None else _default_workers()
     logger.info("Extracting %d filings with %d worker(s) (skipped %d at current version)",
                 total, workers, skipped)
-    args_list = [(cik, acc, str(cfg.paths.raw), str(cfg.paths.clean)) for cik, acc in targets]
+    args_list = [(cik, acc, str(raw_root), str(clean_root), form_type) for cik, acc, form_type in targets]
 
     cur = conn.cursor()
 

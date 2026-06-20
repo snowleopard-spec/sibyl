@@ -29,6 +29,39 @@ def test_local_filing_reads_local_gz(tmp_path):
     assert "<body>hello" in f.html()
 
 
+def test_local_filing_accepts_form_type(tmp_path):
+    """LocalFiling must propagate form_type to edgar.Filing for the dispatch."""
+    p = tmp_path / "primary.html.gz"
+    with gzip.open(p, "wb") as f:
+        f.write(b"<html></html>")
+    f = sx.LocalFiling(cik=1, accession="x", html_path=p, form_type="10-Q")
+    assert f.form == "10-Q"
+
+
+def test_extract_via_edgartools_rejects_unsupported_form(tmp_path):
+    p = tmp_path / "primary.html.gz"
+    with gzip.open(p, "wb") as f:
+        f.write(b"<html></html>")
+    f = sx.LocalFiling(cik=1, accession="x", html_path=p, form_type="8-K")
+    with pytest.raises(ValueError, match="unsupported form_type"):
+        sx._extract_via_edgartools(f, "8-K")
+
+
+def test_section_status_min_ok_words_parameter_overrides_default():
+    """For 10-Q RF, min_ok_words=0 means a 3-word section is 'ok' with no flag."""
+    text = "no material changes"
+    status, info = sx._section_status(text, full_word_count=10_000, min_ok_words=0)
+    assert status == "ok"
+    assert "length_low" not in info["suspicious_flags"]
+
+
+def test_section_status_default_flags_short_section_low():
+    text = "short text here"
+    status, info = sx._section_status(text, full_word_count=10_000)
+    assert status == "ok"
+    assert "length_low" in info["suspicious_flags"]
+
+
 def test_section_status_ok():
     body = "Apple Inc. faces a range of risks. " * 200  # ~1,400 words
     status, info = sx._section_status(body, full_word_count=40_000)
