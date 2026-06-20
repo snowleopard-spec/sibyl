@@ -214,13 +214,29 @@ def parse_all(
     cur = conn.cursor()
     where = ["stack = ?"]
     params: list = [stack]
-    if not force:
-        where.append("(parse_status IS NULL)")
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")
         params.extend(int(c) for c in ciks)
-    sql = "SELECT accession, cik FROM filings WHERE " + " AND ".join(where) + " ORDER BY cik, accession"
-    rows = list(cur.execute(sql, params))
+    sql = (
+        "SELECT accession, cik, parse_status FROM filings WHERE "
+        + " AND ".join(where) + " ORDER BY cik, accession"
+    )
+    candidates = list(cur.execute(sql, params))
+
+    # Selection rule:
+    #   - force=True                       → re-parse every candidate
+    #   - parse_status IS NULL             → not parsed yet, run it
+    #   - parse_status set BUT full.txt missing in this stack's clean dir
+    #     (e.g. row was parsed for a different stack, or the clean tree was
+    #     wiped/migrated) → re-parse so the per-stack clean tree gets populated
+    rows = []
+    for r in candidates:
+        if force or r["parse_status"] is None:
+            rows.append(r)
+            continue
+        full_txt = filing_clean_dir(clean_root, int(r["cik"]), r["accession"]) / "full.txt"
+        if not full_txt.exists():
+            rows.append(r)
 
     total = len(rows)
     for idx, r in enumerate(rows, start=1):
