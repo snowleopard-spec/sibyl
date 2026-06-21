@@ -108,6 +108,7 @@ def cmd_parse(args: argparse.Namespace) -> int:
         ciks=args.cik or None,
         limit=args.limit,
         force=args.force,
+        workers=args.workers,
     )
     clean_size = _disk_usage(clean_root)
     log.info("Filings parsed: %d (stack=%s)", counts.parsed, args.stack)
@@ -349,6 +350,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Emit N random successful filings to stdout for eyeballing.")
     p_parse.add_argument("--suspicious", action="store_true",
                          help="With --sample, draw from filings with at least one suspicious flag.")
+    p_parse.add_argument("--workers", type=int, default=None,
+                         help="Worker process count (default: min(8, cpu_count-1)). Use 1 for inline path.")
     p_parse.set_defaults(func=cmd_parse)
 
     p_download = sub.add_parser("download", help="Stage 1: pull SEC filings for the universe")

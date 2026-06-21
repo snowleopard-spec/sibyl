@@ -158,6 +158,63 @@ def test_parse_all_writes_status_and_skips_existing(tmp_path, fixture_html, conn
     assert counts3.parsed == 2
 
 
+def test_parse_all_workers_2_matches_workers_1(tmp_path, fixture_html, conn):
+    """The parallel path must produce identical DB state to the inline path."""
+    cfg = _make_cfg(tmp_path)
+    for cik in (10, 20, 30, 40):
+        acc = f"00000000{cik:02d}-23-000001"
+        d = cfg.paths.raw / str(cik) / acc
+        d.mkdir(parents=True)
+        with gzip.open(d / "primary.html.gz", "wb") as f:
+            f.write(fixture_html)
+        conn.execute(
+            "INSERT INTO filings(accession, cik, form_type, acceptance_dt, raw_path, downloaded_at) "
+            "VALUES (?, ?, '10-K', '2023-11-02T18:08:38Z', ?, '2026-06-14T00:00:00Z')",
+            (acc, cik, f"raw/{cik}/{acc}/primary.html.gz"),
+        )
+    conn.commit()
+
+    # Pass 1: inline path (workers=1).
+    counts_serial = ps.parse_all(conn, cfg, workers=1)
+    serial_state = list(conn.execute(
+        "SELECT accession, parse_status FROM filings ORDER BY accession"
+    ))
+    serial_sections = {}
+    for row in serial_state:
+        sections_path = cfg.paths.clean / str(row[0].split("-")[0].lstrip("0")) / row[0] / "sections.json"
+        # Build a normalised structure for comparison (strip timestamps).
+        if sections_path.exists():
+            data = json.loads(sections_path.read_text())
+            data.pop("parsed_at", None)
+            serial_sections[row[0]] = data
+
+    # Pass 2: re-parse via the worker-pool path (workers=2). Same content
+    # on disk, so outcomes must match modulo timestamps.
+    counts_parallel = ps.parse_all(conn, cfg, force=True, workers=2)
+    parallel_state = list(conn.execute(
+        "SELECT accession, parse_status FROM filings ORDER BY accession"
+    ))
+    parallel_sections = {}
+    for row in parallel_state:
+        sections_path = cfg.paths.clean / str(row[0].split("-")[0].lstrip("0")) / row[0] / "sections.json"
+        if sections_path.exists():
+            data = json.loads(sections_path.read_text())
+            data.pop("parsed_at", None)
+            parallel_sections[row[0]] = data
+
+    assert counts_serial.parsed == counts_parallel.parsed == 4
+    assert counts_serial.failed == counts_parallel.failed == 0
+    assert [r["parse_status"] for r in serial_state] == [r["parse_status"] for r in parallel_state]
+    assert serial_sections == parallel_sections
+
+
+def test_parse_all_rejects_unknown_stack(tmp_path, conn):
+    """Bad stack arg fails loud before any work happens."""
+    cfg = _make_cfg(tmp_path)
+    with pytest.raises(ValueError, match="unknown stack"):
+        ps.parse_all(conn, cfg, stack="bogus")
+
+
 def test_parse_all_filters_by_cik(tmp_path, fixture_html, conn):
     cfg = _make_cfg(tmp_path)
     for cik in (1, 2):

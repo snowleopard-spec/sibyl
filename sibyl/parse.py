@@ -3,12 +3,14 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
 import tempfile
 import unicodedata
 import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -195,6 +197,39 @@ def parse_filing(
     return sections
 
 
+def _default_workers() -> int:
+    """Default worker count: leave one core for the parent + OS."""
+    return min(8, max(1, (os.cpu_count() or 1) - 1))
+
+
+def _parse_worker(args: tuple[int, str, str, str]) -> dict:
+    """Pure-function task run in a worker process. No DB, no shared state.
+
+    Returns a status dict the parent uses to update DB + counts. Errors are
+    captured (not raised) so one bad filing doesn't poison the pool.
+    """
+    cik, accession, raw_root_str, clean_root_str = args
+    try:
+        sections = parse_filing(
+            cik, accession,
+            raw_root=Path(raw_root_str),
+            clean_root=Path(clean_root_str),
+        )
+        return {
+            "accession": accession,
+            "status": sections["status"],
+            "suspicious": bool(sections.get("full", {}).get("suspicious_flags")),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "accession": accession,
+            "status": None,
+            "suspicious": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def parse_all(
     conn: sqlite3.Connection,
     cfg: Config,
@@ -203,7 +238,15 @@ def parse_all(
     ciks: list[int] | None = None,
     limit: int | None = None,
     force: bool = False,
+    workers: int | None = None,
 ) -> Counts:
+    """Parse all candidate filings into clean text + sections.json.
+
+    `workers` controls the ProcessPoolExecutor pool size:
+      - None (default) → `_default_workers()` (min(8, cpu_count-1))
+      - 1              → inline path, no subprocess fork (cheap for small batches + tests)
+      - >1             → ProcessPoolExecutor with N workers
+    """
     from .config import VALID_STACKS, stack_clean, stack_raw
     if stack not in VALID_STACKS:
         raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
@@ -239,39 +282,61 @@ def parse_all(
             rows.append(r)
 
     total = len(rows)
-    for idx, r in enumerate(rows, start=1):
-        accession = r["accession"]
-        cik = int(r["cik"])
-        try:
-            sections = parse_filing(cik, accession, raw_root=raw_root, clean_root=clean_root)
-        except Exception as exc:  # defensive; parse_filing already catches
-            logger.error("Unexpected parse error CIK %s acc %s: %s", cik, accession, exc)
-            counts.failed += 1
-            continue
+    if total == 0:
+        logger.info("Nothing to parse (no candidates).")
+        return counts
 
-        status = sections["status"]
-        cur.execute(
-            "UPDATE filings SET parse_status = ? WHERE accession = ?",
-            (status, accession),
-        )
-        if status == "ok":
-            counts.parsed += 1
-            if sections["full"].get("suspicious_flags"):
-                counts.suspicious += 1
+    workers = workers if workers is not None else _default_workers()
+    logger.info("Parsing %d filings with %d worker(s)", total, workers)
+    args_list = [
+        (int(r["cik"]), r["accession"], str(raw_root), str(clean_root))
+        for r in rows
+    ]
+
+    def _handle(idx: int, r: dict) -> bool:
+        """Apply one worker result to DB + counts. Returns True when --limit hit."""
+        if r["error"]:
+            logger.error("Worker error on %s: %s", r["accession"], r["error"])
+            counts.failed += 1
         else:
-            counts.failed += 1
-
-        if limit is not None and counts.parsed >= limit:
-            logger.info("Reached --limit %d; stopping.", limit)
-            conn.commit()
-            return counts
-
+            status = r["status"]
+            cur.execute(
+                "UPDATE filings SET parse_status = ? WHERE accession = ?",
+                (status, r["accession"]),
+            )
+            if status == "ok":
+                counts.parsed += 1
+                if r["suspicious"]:
+                    counts.suspicious += 1
+            else:
+                counts.failed += 1
         if idx % 200 == 0 or idx == total:
             conn.commit()
             logger.info(
                 "[%d/%d] parsed=%d failed=%d suspicious=%d",
                 idx, total, counts.parsed, counts.failed, counts.suspicious,
             )
+        return limit is not None and counts.parsed >= limit
+
+    if workers <= 1:
+        # Inline path — used in tests and when --workers 1. No pool overhead.
+        for idx, a in enumerate(args_list, start=1):
+            r = _parse_worker(a)
+            stop = _handle(idx, r)
+            if stop:
+                logger.info("Reached --limit %d; stopping.", limit)
+                break
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_parse_worker, a): a for a in args_list}
+            for idx, fut in enumerate(as_completed(futures), start=1):
+                r = fut.result()
+                stop = _handle(idx, r)
+                if stop:
+                    logger.info("Reached --limit %d; cancelling remaining workers.", limit)
+                    for f in futures:
+                        f.cancel()
+                    break
 
     conn.commit()
     return counts
