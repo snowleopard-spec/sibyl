@@ -1,6 +1,6 @@
 # Sibyl — Handover Note
 
-*Last updated: 2026-06-20 (research-tool pivot complete; not yet deployed to droplet).*
+*Last updated: 2026-06-21 (full S&P 500 backfill complete on Mac; data ready for analysis).*
 
 This document is enough context for someone (or a fresh Claude Code
 window) to pick up Sibyl exactly where the prior session left off.
@@ -10,16 +10,19 @@ window) to pick up Sibyl exactly where the prior session left off.
 ## Where you are in one paragraph
 
 Sibyl has **pivoted from a small-cap signal engine to an S&P-comparison
-research tool.** Work happens on the `research-tool` branch (currently 13
+research tool.** Work happens on the `research-tool` branch (currently 16
 commits ahead of `main`). All Layer-1 modules — download, parse,
 sections, score, diff — were re-used as-is and made stack-aware. New
 modules added: `wiki.py` (Wikipedia S&P 500 scrape), `sp500.py` (membership
 orchestration), `tickers.py` (ticker→CIK), `queried.py` (queried-stack
 manager), `aggregate.py` (rolling sector + S&P means), `chart.py` (6-panel
 PNG), `runner.py` (orchestrator). Two top-level workflows live:
-`sibyl sp500 refresh` and `sibyl research TICKER`. End-to-end smoke
-tested locally on 20 names. **Not yet deployed to droplet** — held per
-user direction until you're ready.
+`sibyl sp500 refresh` and `sibyl research TICKER`. **Full backfill done
+2026-06-21**: 503 S&P 500 names × 5 years of 10-K + 10-Q = 9,837 filings
+parsed, scored, diffed, and aggregated on the Mac. Download was offloaded
+to the DigitalOcean droplet (29 min); the CPU-bound stages ran locally
+(~3.5h, with sections being the long pole). End-to-end `sibyl research
+AAPL` verified.
 
 The canonical spec for the current product is **`docs/RESEARCH_TOOL_SPEC.md`**.
 The original signal-engine spec (`SIBYL BUILD SPEC.md`) is kept as historical
@@ -28,27 +31,59 @@ the research tool reuses.
 
 ---
 
+## Backfill summary (2026-06-21)
+
+| Stage | Where | Wall clock | Notes |
+|---|---|---|---|
+| Download | Droplet (tmux: `sibyl-backfill`) | 29 min | 0 failures; rate-limited at 8 req/s |
+| rsync to Mac | Mac | 5 min | 2.41 GB at ~6.6 MB/s |
+| Parse | Mac (workers=8) | 16 min | 0 failures; 4 suspicious flags |
+| Sections | Mac (workers=7) | **3h 5min** | the long pole — see breakdown below |
+| Score | Mac | 2.5 min | 51,780 rows, 0 errors |
+| Diff | Mac | 3.5 min | 20,325 rows; 1,855 had no prior to compare |
+| Aggregate | Mac | <1 min | 1,194 sector-quarter rolling rows |
+
+**Final dataset:**
+- `filings` 9,837 — 2,462 × 10-K + 7,375 × 10-Q across 500 of 503 CIKs (3 had no qualifying filings in window)
+- `filing_scores` 51,780 — LM sentiment counts by section
+- `filing_signals` 20,325 — diff vs prior filing
+- `sp500_membership` 503 across 11 sectors
+- `sp500_aggregates` 1,194
+- Disk: 2.2 GB raw + 2.8 GB clean
+
+**Section extraction quality:**
+- 10-K: 2,321 OK / 141 fail (**94.3% OK**)
+- 10-Q: 6,309 OK / 1,066 fail (**85.5% OK**)
+- Overall: 8,317 OK / 1,140 fail (**88.0% OK**)
+
+---
+
 ## The single action to take when resuming
 
-**Deploy to the droplet** (task 37 of the implementation order; held by
-user). Sequence:
+**Diagnose the section_fail concentration in megabanks/megacap industrials.**
+The 1,140 failures aren't random — they're concentrated in ~15 CIKs (banks
++ a few utilities/tech), 10 of which have 100% fail rate. Suggested
+30-min investigation:
 
-1. SSH to `161.35.122.12`, clone the repo, check out `research-tool`.
-2. Copy `config.example.yaml` → `config.yaml`, set the SEC `user_agent`.
-3. `python3 -m venv .venv && .venv/bin/pip install -e .`
-4. First real run inside `tmux`:
-   ```
-   tmux new -s sibyl-backfill
-   .venv/bin/sibyl sp500 refresh    # ~4-6h: 503 names × ~25 filings each
-   ```
-5. Install the two cron jobs per `RESEARCH_TOOL_SPEC.md §8`:
-   weekly filings + monthly IVV-style membership re-check.
-6. Smoke-test on the droplet: `sibyl research AAPL`. Verify the chart
-   PNG lands at `data/queried/AAPL/`.
+1. Pick 3 fully-failing tickers: **JPM (CIK 19617), MS (895421), IBM (51143)**.
+2. Open one filing per ticker:
+   `cat data/sp500/clean/19617/<latest-accession>/sections.json | jq .`
+   to see the failure mode (which section, what error).
+3. Compare the raw filing text (`full.txt`) against `sibyl/sections.py`'s
+   regex anchors. Banks tend to use **"Part II, Item 1A"** ordering in
+   10-Qs (not "Item 1A"), which may trip the existing anchors.
+4. Decide between:
+   - **(a) Add regex variants** in `sections.py` for bank-style ordering. Re-run
+     `sibyl sections --stack sp500 --force` (would re-process ~9,000 filings
+     in 3h, but only fixes the targeted ones).
+   - **(b) Lean on edgartools' `TenQ.Item("1A")`** for the fallback path
+     when our regex returns nothing — accept whatever edgartools gives.
+   - **(c) Accept the loss.** 88% coverage is fine; the chart/diff code
+     handles missing sections gracefully. Add a quality flag to the doc.
 
-If unsure whether the droplet has enough disk (50 GB total): backfill
-needs ~5 GB raw + ~2 GB clean + DB + logs. Add a volume if `df -h`
-shows <15 GB free.
+After that, install the two cron jobs per `RESEARCH_TOOL_SPEC.md §8`
+(weekly filings refresh + monthly membership re-check) — currently
+nothing keeps the data fresh.
 
 ---
 
@@ -185,13 +220,17 @@ sibyl/
     │   ├── record.jsonl
     │   └── membership_snapshots/wiki_sp500_<YYYY-MM-DD>.html
     │
-    ├── queried/                       # on-demand stack
-    │   ├── raw/<CIK>/<accession>/...  (only for tickers NOT in S&P)
-    │   ├── clean/<CIK>/<accession>/...
-    │   └── record.jsonl
-    │
-    └── raw/, clean/                   # ORPHANED — see "Known unknowns" below
+    └── queried/                       # on-demand stack
+        ├── raw/<CIK>/<accession>/...  (only for tickers NOT in S&P)
+        ├── clean/<CIK>/<accession>/...
+        └── record.jsonl
 ```
+
+*(Pre-pivot dirs `data/raw/`, `data/clean/`, `data/audits/`, `data/exports/`,
+`data/prices/`, `data/universe.json`, `data/universe_snapshots/` were
+removed during 2026-06-21 cleanup. ~7 GB freed. If anything in
+`audits/` was wanted, it's reachable via `git show` on the audit-related
+commits.)*
 
 ---
 
@@ -239,13 +278,14 @@ sibyl/
 
 | Item | Severity | Notes |
 |---|---|---|
-| **Not deployed to droplet yet** | required | Held per user direction. Task 37 of impl order. Steps in "The single action to take when resuming" above. |
-| **~20% 10-Q section_fail rate** | medium | Confirmed in the smoke test: of 285 10-Qs, 57 had section extraction fail. 10-Q MD&A is harder than 10-K. Worth running the existing LLM-audit pattern (`scripts/` — deleted in cleanup; reconstruct from git history of `babfbf1`) against a 100-filing 10-Q sample to characterise the failures. |
-| **Orphaned `data/raw/` and `data/clean/`** | low | ~7 GB of pre-pivot small-cap filings sitting at the legacy paths (no `sp500/` prefix). Invisible to the new pipeline. Decision needed: delete, archive (`tar -czf`), or migrate the AAPL/etc. that overlap S&P. The new pipeline correctly re-downloads them into `data/sp500/raw/` if not migrated. |
+| **No cron installed yet** | required | Data won't stay fresh without it. `RESEARCH_TOOL_SPEC.md §8` defines: weekly `sibyl sp500 refresh` for new filings; monthly membership re-check. Install on the existing droplet alongside `unicornhunt.service`. |
+| **1,140 section_fails (12% rate), concentrated in megabanks** | medium | Not random — see "Backfill summary" above. Top offenders (100% fail rate, 20/20 filings): BNY, MS, C, EIX, WFC, IBM, INTC, XOM, JPM, AEP. Likely "Part II, Item 1A" vs "Item 1A" anchor mismatch. See "The single action to take when resuming" for the proposed 30-min triage. |
+| **3 CIKs with zero qualifying filings** | low | 500 of 503 S&P members got filings; 3 didn't (probably recent IPOs that postdate the 5y window). Run `SELECT cik FROM sp500_membership WHERE cik NOT IN (SELECT DISTINCT cik FROM filings WHERE stack='sp500');` to identify, then decide whether to widen the window. |
 | **Wikipedia lag** | low | Constituents page is editor-maintained; S&P index changes can show up hours-to-days late. For a monthly-refresh research tool this doesn't matter, but flag if you ever need realtime accuracy. |
 | **Deprecated `Paths.raw` / `Paths.clean` aliases** | very low | About 30 test sites still reference them. They point at sp500_*; removing them requires test refactoring with no functional benefit. Defer until someone has a reason to touch those tests. |
 | **edgartools "legacy parser fallback" warnings** | very low | Chatty WARNING logs during section extraction on older filings (pre-2020-ish). Non-fatal; edgartools still returns the right content. Suppress at logger level if it bothers you. |
 | **edgartools "_tcache" warning** | very low | "Failed to clear locale-corrupted cache" — non-fatal; edgartools internal. |
+| **DB backup `sibyl.db.pre-rsync-backup-20260621_175325`** | very low | 17 MB snapshot of the Mac DB taken before the droplet rsync overwrite. Safe to delete once the current DB has been used a while. |
 
 ---
 
@@ -276,26 +316,33 @@ This is what the droplet's weekly cron will do. ~4-6h on first run;
 ```bash
 cd /Users/wessch/Projects/Projects/sibyl
 .venv/bin/pytest -q                           # expect 151 passed
-.venv/bin/sibyl sp500 status                  # expect ~503 members
+.venv/bin/sibyl status                        # expect 9837 filings, 51780 scores, 20325 signals
+.venv/bin/sibyl sp500 status                  # expect 503 members
 .venv/bin/sibyl sp500 refresh --no-download   # ~5s; refreshes membership, rebuilds aggregates
 .venv/bin/sibyl research AAPL --no-download   # writes data/queried/AAPL/chart_<stamp>.png
 ```
 
-If anything in the live data has changed since 2026-06-20, the
-membership refresh will pick it up. The chart will use whatever
-filings happen to be in the DB.
+If the membership has changed since the last refresh, Wikipedia will
+reflect it. The chart uses whatever filings are in the DB.
 
 ---
 
 ## What I'd say if I were the prior Claude
 
-> "Everything works locally. The thing that's actually unproven is the
-> droplet deployment — you might hit ops surprises (Python version, disk,
-> firewall, cron environment) that the local-only smoke didn't catch.
-> Don't waste a session writing more features before deploying; the
-> features that aren't on a server aren't shippable. Run the backfill in
-> a tmux session and walk away; the SEC rate limiter does the right thing
-> on its own. Once it's up, install the cron, run `sibyl research AAPL`
-> once to confirm, and then you can decide whether the next session is
-> 'fix the 20% 10-Q section_fail rate' or 'add a second ETF holdings
-> source for weight data'."
+> "The backfill landed clean — 9,837 filings, zero download failures,
+> zero score errors. The interesting next thing is the 1,140 section
+> fails: they're NOT random — 25% are concentrated in just 15 mega-cap
+> CIKs (mostly banks). That's a 30-minute investigation that probably
+> reclaims most of them by adding a couple of regex variants for
+> 'Part II, Item 1A' ordering. Don't go down the LLM-audit path for
+> this — the pattern is obvious enough that a manual look at three
+> JPM/MS/IBM filings will tell you what's needed.
+>
+> Second priority: install the cron. The data is current as of 2026-06-21
+> and will rot without weekly refresh. Until that's installed, every
+> `sibyl research` is reading a frozen-in-time corpus.
+>
+> Don't add features yet. The current tool works end-to-end and the
+> next user-visible improvement is more interesting analysis (heat
+> maps, sector overlays) — but that's only worth building once you've
+> actually been *using* the tool for a week and know what's missing."
