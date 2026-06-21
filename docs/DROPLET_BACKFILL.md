@@ -10,6 +10,13 @@ The initial S&P 500 backfill is ~503 names × ~25 filings (10-K + 5y of 10-Q) �
 | rsync data back | Mac | ~10-20 min | ~6 GB over home broadband |
 | Parse + sections + score + diff + aggregate | Mac | ~30-60 min | CPU-bound; Mac's M-series multi-core is much faster than a 1-CPU droplet |
 
+> **Critical: do NOT run sections on a 1-CPU droplet.** Measured 2026-06-21 on
+> a basic DigitalOcean droplet: section extraction took ~11 seconds per filing.
+> For 12,500 filings that's **~38 hours of sections alone** — vs ~30 min on a
+> Mac with `workers=8`. The download/sections split below isn't an optimisation;
+> on a 1-CPU droplet it's a practical necessity. If you upgrade to an 8-vCPU+
+> droplet you can run sections there, but a Mac is still cheaper.
+
 ---
 
 ## 0. Prerequisites
@@ -51,17 +58,39 @@ nano config.yaml
 .venv/bin/pytest -q                      # 151 passed (optional)
 ```
 
+> **L&M dictionary**: only needed for the scoring stage, which in this
+> split-architecture happens **on the Mac**, not the droplet. So the
+> droplet doesn't need `data/lm_master_dictionary.csv`. If you ever want
+> to run the full pipeline on the droplet (e.g. for the §2 smoke test
+> that exercises all stages end-to-end), scp it from your Mac first:
+> ```bash
+> # FROM YOUR MAC, not the droplet:
+> scp ~/Projects/Projects/sibyl/data/lm_master_dictionary.csv \
+>     root@161.35.122.12:/root/sibyl/data/
+> ```
+
 ---
 
-## 2. Smoke-test the deploy on a small subset (~10 min)
+## 2. Smoke-test the deploy on a small subset (~10 min download; ~75 min total)
 
-Before committing to a 4-hour pull, run the existing 20-name smoke test on the droplet. This validates the full pipeline end-to-end and catches any environment surprises early.
+Before committing to a 3-4 hour real backfill, run the existing 20-name smoke test to validate the deploy. **Heads up about timing on a 1-CPU droplet** (measured 2026-06-21):
+
+| Stage | 1-CPU droplet | M-series Mac |
+|---|---|---|
+| Download (380 filings) | ~80 sec | similar |
+| Parse | ~9 min (single-threaded) | ~1 min (workers=8 after the parallel-parse change) |
+| Sections | **~72 min (single-threaded)** | ~5 min (workers=8) |
+| Score / diff / aggregate / chart | ~2 min | ~30 sec |
+
+If you want a fast "is the deploy alive" check, you can `Ctrl-C` after the download step finishes (~2 min in) — that alone proves the network path, auth, config, and DB setup work.
 
 ```bash
+# First scp the LM dict over (only needed for full smoke; not for real backfill):
+# (from Mac:) scp ~/Projects/Projects/sibyl/data/lm_master_dictionary.csv root@161.35.122.12:/root/sibyl/data/
 .venv/bin/python scripts/smoke_sp500.py
 ```
 
-Expected outcome: completes in ~7 min, ~215 filings downloaded, ~200 parsed, chart written to `data/queried/AAPL/chart_AAPL_*.png`. If it crashes — fix that first (probably a missing dep or a config issue) before proceeding to the real run.
+Expected on the droplet: ~75-80 min total to complete. Chart writes to `data/queried/AAPL/chart_AAPL_*.png`. If anything crashes (other than the slow sections stage), fix it before the real run.
 
 ---
 
@@ -219,6 +248,24 @@ Likely cause: the rsync didn't preserve the path. Check:
 ls data/sp500/raw/320193/ | head -3       # should show accession folders
 ```
 If missing, re-run the rsync (the `-a` flag preserves structure).
+
+### `FileNotFoundError: data/lm_master_dictionary.csv not found` during score
+
+Hits when running the full pipeline on a fresh machine (the dictionary is gitignored under `data/`). Two fixes:
+
+- **If on droplet (only relevant if running scoring there)**: scp from Mac
+  ```bash
+  scp ~/Projects/Projects/sibyl/data/lm_master_dictionary.csv root@161.35.122.12:/root/sibyl/data/
+  ```
+- **If on Mac**: download fresh from Notre Dame SRAF
+  ```bash
+  cd data
+  curl -L -o lm_master_dictionary.csv \
+    "https://sraf.nd.edu/wp-content/uploads/2025/01/Loughran-McDonald_MasterDictionary_1993-2024.csv"
+  ```
+  (URL pattern occasionally changes; if 404, browse https://sraf.nd.edu/loughranmcdonald-master-dictionary/.)
+
+For the split-architecture flow described in §3-5, the droplet doesn't need this file at all — scoring runs on the Mac where the file already exists.
 
 ### Unicorn affected by the download
 
