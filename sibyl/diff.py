@@ -84,7 +84,9 @@ def match_prior_filings(
     if stack not in VALID_STACKS:
         raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
     cur = conn.cursor()
-    where = ["parse_status = 'ok'", "stack = ?"]
+    # Include section_fail: those filings still have a clean `full` text.
+    # Per-section diff is gated by both sides having that section_ok.
+    where = ["parse_status IN ('ok', 'partial', 'section_fail')", "stack = ?"]
     params: list = [stack]
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")
@@ -293,7 +295,9 @@ def compute_all(
     counts.skipped = skipped
 
     cur = conn.cursor()
-    where = ["parse_status = 'ok'", "stack = ?"]
+    # Include section_fail: those filings still have a clean `full` text.
+    # Per-section diff is gated by both sides having that section_ok.
+    where = ["parse_status IN ('ok', 'partial', 'section_fail')", "stack = ?"]
     params: list = [stack]
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")

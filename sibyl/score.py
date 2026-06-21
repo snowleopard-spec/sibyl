@@ -119,7 +119,9 @@ def compute_doc_frequencies(
     df: Counter[str] = Counter()
     n_docs = 0
     cur = conn.cursor()
-    where = ["parse_status = 'ok'", "stack = ?"]
+    # Include section_fail: those filings still have a clean `full` text
+    # (over_extracted only affects RF/MDNA; _section_eligible skips them).
+    where = ["parse_status IN ('ok', 'partial', 'section_fail')", "stack = ?"]
     params: list = [stack]
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")
@@ -221,7 +223,9 @@ def _select_targets(
     """Return ((cik, accession), skipped_count). Skipped = already scored
     at current SCORER_VERSION (any rows present)."""
     cur = conn.cursor()
-    where = ["parse_status = 'ok'", "stack = ?"]
+    # Include section_fail: those filings still have a clean `full` text
+    # (over_extracted only affects RF/MDNA; _section_eligible skips them).
+    where = ["parse_status IN ('ok', 'partial', 'section_fail')", "stack = ?"]
     params: list = [stack]
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")

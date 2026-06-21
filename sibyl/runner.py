@@ -84,8 +84,8 @@ def refresh_sp500(
         sec_counts = sections_mod.extract_all(conn, cfg, stack="sp500")
         summary["sections"] = {
             "processed": sec_counts.processed, "both_ok": sec_counts.both_ok,
-            "section_fail": sec_counts.section_fail, "suspicious": sec_counts.suspicious,
-            "skipped": sec_counts.skipped,
+            "partial": sec_counts.partial, "section_fail": sec_counts.section_fail,
+            "suspicious": sec_counts.suspicious, "skipped": sec_counts.skipped,
         }
 
         logger.info("Scoring filings...")
@@ -129,7 +129,7 @@ def render_sp500_summary(summary: dict) -> str:
     else:
         out.append(f"  New filings:       {dl.get('new_filings', 0)}  (skipped {dl.get('skipped', 0)}, failed {dl.get('failed', 0)})")
         sec = summary.get("sections", {})
-        out.append(f"  Sections both-ok:  {sec.get('both_ok', 0)}  (section_fail {sec.get('section_fail', 0)})")
+        out.append(f"  Sections both-ok:  {sec.get('both_ok', 0)}  (partial {sec.get('partial', 0)}, section_fail {sec.get('section_fail', 0)})")
         sc = summary.get("score", {})
         out.append(f"  Score rows:        {sc.get('rows_written', 0)}")
         diff = summary.get("diff", {})

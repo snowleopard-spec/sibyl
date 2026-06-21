@@ -24,8 +24,12 @@ from .parse import filing_clean_dir
 
 logger = logging.getLogger(__name__)
 
-EXTRACTOR_VERSION = "1"
+EXTRACTOR_VERSION = "2"  # bumped 2026-06-21: introduced 'partial' filing status
 EXTRACTOR_NAME = f"edgartools-{getattr(edgar, '__version__', 'unknown')}"
+
+# Filing-level statuses returned by _compute_filing_status. Stored in
+# filings.parse_status and in sections.json["status"].
+FILING_STATUSES = ("ok", "partial", "section_fail", "parse_fail")
 
 # Thresholds.
 MIN_OK_WORDS = 1000
@@ -57,6 +61,7 @@ SUPPORTED_FORM_TYPES = ("10-K", "10-Q")
 class Counts:
     processed: int = 0
     both_ok: int = 0
+    partial: int = 0
     section_fail: int = 0
     suspicious: int = 0
     skipped: int = 0
@@ -107,6 +112,32 @@ def _extract_via_edgartools(filing: "LocalFiling", form_type: str) -> tuple[str,
     raise ValueError(
         f"unsupported form_type {form_type!r}; expected one of {SUPPORTED_FORM_TYPES}"
     )
+
+
+def _compute_filing_status(rf_status: str, mdna_status: str, *, full_status: str = "ok") -> str:
+    """Filing-level status from per-section statuses.
+
+    - parse_fail / anything other than ok in `full_status`: trumps everything
+      (full text didn't clean — sections weren't extractable in the first place).
+    - section_fail: any section is 'over_extracted' (boundary detection lost the
+      terminator — extracted text is unreliable, can poison LM scoring), OR
+      neither section produced usable content.
+    - ok: both rf and mdna extracted cleanly.
+    - partial: one section is 'ok'; the other is 'missing' or 'incorp_ref'
+      (legitimate filing pattern — the content lives in the prior 10-K or in
+      the Annual Report incorporated by reference; not a bug).
+    """
+    if full_status != "ok":
+        return full_status
+    if rf_status == "over_extracted" or mdna_status == "over_extracted":
+        return "section_fail"
+    rf_ok = rf_status == "ok"
+    md_ok = mdna_status == "ok"
+    if rf_ok and md_ok:
+        return "ok"
+    if rf_ok or md_ok:
+        return "partial"
+    return "section_fail"
 
 
 def _section_status(text: str | None, *, full_word_count: int, hard_floor: int = 0,
@@ -232,12 +263,7 @@ def extract_sections(
     sections["mdna"] = {"status": mdna_status, **mdna_info}
 
     full_status = (sections.get("full") or {}).get("status", "ok")
-    if full_status != "ok":
-        sections["status"] = full_status   # parse_fail still trumps
-    elif rf_status == "ok" and mdna_status == "ok":
-        sections["status"] = "ok"
-    else:
-        sections["status"] = "section_fail"
+    sections["status"] = _compute_filing_status(rf_status, mdna_status, full_status=full_status)
 
     sections["parsed_at"] = _utc_now()
     _atomic_write_text(sections_path, json.dumps(sections, indent=2, sort_keys=True))
@@ -250,7 +276,7 @@ def _apply_yoy_flags(conn: sqlite3.Connection, clean_root: Path) -> dict[str, in
     cur = conn.cursor()
     rows = list(cur.execute(
         "SELECT cik, accession, filing_date FROM filings "
-        "WHERE parse_status IN ('ok', 'section_fail') "
+        "WHERE parse_status IN ('ok', 'partial', 'section_fail') "
         "ORDER BY cik, filing_date"
     ))
     by_cik: dict[int, list[tuple[str, str, dict]]] = {}
@@ -412,11 +438,13 @@ def extract_all(
             status = r["status"]
             if status == "ok":
                 counts.both_ok += 1
+            elif status == "partial":
+                counts.partial += 1
             elif status == "section_fail":
                 counts.section_fail += 1
             if r["suspicious"]:
                 counts.suspicious += 1
-            db_status = status if status in ("ok", "section_fail", "parse_fail") else "section_fail"
+            db_status = status if status in FILING_STATUSES else "section_fail"
             cur.execute(
                 "UPDATE filings SET parse_status = ? WHERE accession = ?",
                 (db_status, r["accession"]),
@@ -424,9 +452,9 @@ def extract_all(
         if idx % 200 == 0 or idx == total:
             conn.commit()
             logger.info(
-                "[%d/%d] processed=%d ok=%d section_fail=%d suspicious=%d",
+                "[%d/%d] processed=%d ok=%d partial=%d section_fail=%d suspicious=%d",
                 idx, total, counts.processed, counts.both_ok,
-                counts.section_fail, counts.suspicious,
+                counts.partial, counts.section_fail, counts.suspicious,
             )
         return limit is not None and counts.processed >= limit
 
@@ -495,7 +523,7 @@ def compute_stats(conn: sqlite3.Connection, clean_root: Path) -> dict:
     per_section_flags: dict[str, dict[str, int]] = {s: {} for s in SECTIONS}
     by_year_ok: dict[str, dict[int, int]] = {s: {} for s in SECTIONS}
     by_year_total: dict[int, int] = {}
-    both_ok = section_fail = 0
+    both_ok = partial = section_fail = 0
 
     # Date lookup
     cur = conn.cursor()
@@ -516,9 +544,12 @@ def compute_stats(conn: sqlite3.Connection, clean_root: Path) -> dict:
         if year is not None:
             by_year_total[year] = by_year_total.get(year, 0) + 1
 
-        if sec.get("status") == "ok":
+        status = sec.get("status")
+        if status == "ok":
             both_ok += 1
-        elif sec.get("status") == "section_fail":
+        elif status == "partial":
+            partial += 1
+        elif status == "section_fail":
             section_fail += 1
 
         for sect in SECTIONS:
@@ -543,6 +574,7 @@ def compute_stats(conn: sqlite3.Connection, clean_root: Path) -> dict:
 
     return {
         "both_ok": both_ok,
+        "partial": partial,
         "section_fail": section_fail,
         "per_section_status": per_section_status,
         "per_section_words": {
@@ -563,9 +595,10 @@ def compute_stats(conn: sqlite3.Connection, clean_root: Path) -> dict:
 
 def render_stats(stats: dict) -> str:
     out = []
-    total = stats["both_ok"] + stats["section_fail"]
+    total = stats["both_ok"] + stats.get("partial", 0) + stats["section_fail"]
     out.append(f"Total processed (at current extractor version): {total}")
     out.append(f"  both ok:      {stats['both_ok']}")
+    out.append(f"  partial:      {stats.get('partial', 0)}")
     out.append(f"  section_fail: {stats['section_fail']}")
     out.append("")
     for sect in SECTIONS:
@@ -597,9 +630,9 @@ def pick_samples(clean_root: Path, n: int, *, suspicious_only: bool, seed: int |
     for _cik, accession, sec in _iter_sections(clean_root):
         if sec.get("section_extractor_version") != EXTRACTOR_VERSION:
             continue
-        if sec.get("status") not in ("ok", "section_fail"):
+        if sec.get("status") not in ("ok", "partial", "section_fail"):
             continue
-        flagged = any((sec.get(s) or {}).get("suspicious_flags") for s in SECTIONS) or sec.get("status") == "section_fail"
+        flagged = any((sec.get(s) or {}).get("suspicious_flags") for s in SECTIONS) or sec.get("status") in ("partial", "section_fail")
         if suspicious_only and not flagged:
             continue
         if (not suspicious_only) and flagged:
@@ -638,7 +671,7 @@ def pick_validation_set(conn: sqlite3.Connection, clean_root: Path, n: int, *, s
 
     cur = conn.cursor()
     accession_to_year: dict[str, str] = {}
-    for r in cur.execute("SELECT cik, accession, filing_date FROM filings WHERE parse_status IN ('ok','section_fail')"):
+    for r in cur.execute("SELECT cik, accession, filing_date FROM filings WHERE parse_status IN ('ok','partial','section_fail')"):
         accession_to_year[r["accession"]] = r["filing_date"] or ""
 
     yoy_candidates: list[tuple[int, str]] = []
@@ -658,7 +691,7 @@ def pick_validation_set(conn: sqlite3.Connection, clean_root: Path, n: int, *, s
 
     # Oldest
     oldest = list(cur.execute(
-        "SELECT cik, accession FROM filings WHERE parse_status IN ('ok','section_fail') "
+        "SELECT cik, accession FROM filings WHERE parse_status IN ('ok','partial','section_fail') "
         "ORDER BY filing_date ASC LIMIT ?", (bucket_size,)
     ))
     oldest_list = [(int(r["cik"]), r["accession"]) for r in oldest]

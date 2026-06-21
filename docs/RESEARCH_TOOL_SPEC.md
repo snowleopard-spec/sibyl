@@ -316,6 +316,26 @@ def _make_report(filing, form_type):
 - **10-Q Risk Factors are typically minimal.** Most quarters: "There have been no material changes from Item 1A in our most recent Form 10-K." That short text *is* the section — not a stub. Adjust `MDNA_MIN_REAL_WORDS` (currently MDNA-only) to **not** apply to 10-Q RF. Maybe introduce `RF_10Q_MIN_WORDS = 20` (low — we want to keep the "no changes" placeholder, it's a real signal).
 - **10-Q MD&A** is typically smaller than a 10-K's (single quarter vs full year) — keep the 100-word MDNA floor.
 
+### 6.3 Filing-level status taxonomy (v2, introduced 2026-06-21)
+
+After the full 2026-06-21 backfill (9,837 filings) revealed that ~12% were being
+classified as `section_fail` under the original binary rule — even when one
+section extracted cleanly — the taxonomy split into **three buckets**:
+
+| Status | Meaning | When | Scored? |
+|---|---|---|---|
+| `ok` | both RF and MD&A extracted cleanly | both per-section statuses are `ok` | yes (full + RF + MDNA) |
+| `partial` | one section extracted; other is *legitimately* missing | the other side is `missing` or `incorp_ref` (filer says "see prior 10-K" or "see Annual Report") | yes (full + whichever section is OK) |
+| `section_fail` | extraction is broken or both sides unusable | any side is `over_extracted` (boundary detection failed); OR neither side is `ok` | yes (full only — RF/MDNA polluted or empty) |
+
+The single source of truth is `sections._compute_filing_status(rf, mdna, full)`.
+
+**Downstream gating:** `score.py` and `diff.py` filter `parse_status IN ('ok', 'partial', 'section_fail')` so that the *full text* gets scored regardless. Per-section gating is delegated to `score._section_eligible`, which only emits rows for sections with `status='ok'`.
+
+Result on the 2026-06-21 backfill: 8,630 `ok` (87.7%), 895 `partial` (9.1%), 312 `section_fail` (3.2%) → **96.8% of filings produce usable scores**.
+
+The 312 remaining `section_fail` are mostly **bank/financial 10-Q MD&A `over_extracted`** — boundary detection in `edgartools` fails on banks because their MD&A has huge financial tables and the next-section terminator (Item 3) is hidden inside a table. A robust fix would require either custom terminator regex or table-aware section extraction; see §12.
+
 ### 6.2 Same-quarter prior matching in `diff.py`
 
 For 10-K-to-10-K, the existing `(cik, form_type, period_of_report)` ordering works because annual reports come once a year. For 10-Q, we want **same fiscal quarter** prior year:
@@ -472,8 +492,11 @@ Run this *after* the new tool is end-to-end working locally but *before* droplet
 
 | Item | Severity | When to revisit |
 |---|---|---|
-| iShares CSV URL stability — BlackRock has changed it in the past | medium | If a refresh fails, check the URL first |
-| 10-Q RF "no material changes" wording varies — need a flexible detector for the "trivial RF" pattern | medium | After first ~50 10-Q extractions land |
-| Foreign / ADR ticker mappings (BABA, TSM, etc.) — may need a hand-curated overlay | low | When a user reports a failed query |
-| Chart visual design — first version is functional, may need iteration | low | After first analyst use |
-| Backfill disk pressure on droplet — assumed fine, may need volume | low | If `df -h` shows <20% free after backfill |
+| **Cron not installed** — data won't refresh on its own | required | Before the dataset goes stale (~1 week from 2026-06-21) |
+| **312 `section_fail` filings (mostly bank 10-Q MD&A `over_extracted`)** — boundary detection in edgartools fails when the next-section terminator is hidden inside a financial table. Affects ~30 specific tickers (JPM, AXP, FITB, HBAN, KEY, NTRS, SYF, CFG, STT, AEP, and ~20 others). Full text is still scored; only the MD&A delta signal is lost for these names. | medium | A custom post-process trim (regex for "Item 3" / "Quantitative and Qualitative") could reclaim most. ~half-day project. |
+| **Wikipedia membership lag** — constituents page is editor-maintained; S&P index changes show up hours-to-days late | low | If realtime accuracy ever needed (it isn't for a monthly-refresh research tool) |
+| **3 S&P members with zero qualifying filings** — probably recent IPOs that postdate the 5y window | low | When considering window-width changes |
+| **Foreign / ADR ticker mappings** (BABA, TSM, etc.) — may need a hand-curated overlay | low | When a user reports a failed query |
+| **Chart visual design** — first version is functional, may need iteration | low | After first analyst use |
+| **iShares CSV URL stability** — replaced by Wikipedia in `sibyl/wiki.py`; iShares is no longer a dependency | resolved | n/a |
+| **Backfill disk pressure on droplet** — measured: ~2.4 GB after full backfill; plenty of headroom | resolved | n/a |

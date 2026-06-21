@@ -1,6 +1,6 @@
 # Sibyl — Handover Note
 
-*Last updated: 2026-06-21 (full S&P 500 backfill complete on Mac; data ready for analysis).*
+*Last updated: 2026-06-21 (full S&P 500 backfill complete + v2 status taxonomy applied; 96.8% scoring coverage).*
 
 This document is enough context for someone (or a fresh Claude Code
 window) to pick up Sibyl exactly where the prior session left off.
@@ -10,7 +10,7 @@ window) to pick up Sibyl exactly where the prior session left off.
 ## Where you are in one paragraph
 
 Sibyl has **pivoted from a small-cap signal engine to an S&P-comparison
-research tool.** Work happens on the `research-tool` branch (currently 16
+research tool.** Work happens on the `research-tool` branch (currently 18
 commits ahead of `main`). All Layer-1 modules — download, parse,
 sections, score, diff — were re-used as-is and made stack-aware. New
 modules added: `wiki.py` (Wikipedia S&P 500 scrape), `sp500.py` (membership
@@ -18,16 +18,15 @@ orchestration), `tickers.py` (ticker→CIK), `queried.py` (queried-stack
 manager), `aggregate.py` (rolling sector + S&P means), `chart.py` (6-panel
 PNG), `runner.py` (orchestrator). Two top-level workflows live:
 `sibyl sp500 refresh` and `sibyl research TICKER`. **Full backfill done
-2026-06-21**: 503 S&P 500 names × 5 years of 10-K + 10-Q = 9,837 filings
-parsed, scored, diffed, and aggregated on the Mac. Download was offloaded
-to the DigitalOcean droplet (29 min); the CPU-bound stages ran locally
-(~3.5h, with sections being the long pole). End-to-end `sibyl research
-AAPL` verified.
+2026-06-21**: 503 S&P 500 names × 5 years of 10-K + 10-Q = 9,837 filings,
+end-to-end pipeline run. **96.8% of filings produce usable scores**
+(8,630 ok + 895 partial; 312 section_fail still get full-text scoring).
+End-to-end `sibyl research AAPL` verified.
 
 The canonical spec for the current product is **`docs/RESEARCH_TOOL_SPEC.md`**.
-The original signal-engine spec (`SIBYL BUILD SPEC.md`) is kept as historical
-reference; it still accurately describes the Layer-1 EDGAR pipeline modules
-the research tool reuses.
+The original signal-engine spec (`docs/Aux/SIBYL BUILD SPEC.md`) is kept as
+historical reference; it still accurately describes the Layer-1 EDGAR
+pipeline modules the research tool reuses.
 
 ---
 
@@ -39,51 +38,104 @@ the research tool reuses.
 | rsync to Mac | Mac | 5 min | 2.41 GB at ~6.6 MB/s |
 | Parse | Mac (workers=8) | 16 min | 0 failures; 4 suspicious flags |
 | Sections | Mac (workers=7) | **3h 5min** | the long pole — see breakdown below |
-| Score | Mac | 2.5 min | 51,780 rows, 0 errors |
-| Diff | Mac | 3.5 min | 20,325 rows; 1,855 had no prior to compare |
+| Score + Diff (initial) | Mac | 6 min | 51,780 + 20,325 rows |
+| **v2 taxonomy relabel + rescore** | Mac | 3 min | +4,582 score rows, +1,935 signal rows |
 | Aggregate | Mac | <1 min | 1,194 sector-quarter rolling rows |
 
 **Final dataset:**
 - `filings` 9,837 — 2,462 × 10-K + 7,375 × 10-Q across 500 of 503 CIKs (3 had no qualifying filings in window)
-- `filing_scores` 51,780 — LM sentiment counts by section
-- `filing_signals` 20,325 — diff vs prior filing
+- `filing_scores` 56,362 — LM sentiment counts by section
+- `filing_signals` 22,260 — diff vs prior filing
 - `sp500_membership` 503 across 11 sectors
 - `sp500_aggregates` 1,194
 - Disk: 2.2 GB raw + 2.8 GB clean
 
-**Section extraction quality:**
-- 10-K: 2,321 OK / 141 fail (**94.3% OK**)
-- 10-Q: 6,309 OK / 1,066 fail (**85.5% OK**)
-- Overall: 8,317 OK / 1,140 fail (**88.0% OK**)
+**Filing-level status (v2 taxonomy, see `RESEARCH_TOOL_SPEC.md §6.3`):**
+- `ok` (both sections extracted): **8,630 (87.7%)**
+- `partial` (one ok; other is legitimate `missing`/`incorp_ref`): **895 (9.1%)**
+- `section_fail` (any `over_extracted` or both unusable): **312 (3.2%)**
+- **Scoring coverage: 9,837/9,837 filings have at least full-text scored = 100%; 9,525/9,837 also have ≥1 section scored = 96.8%**
+
+The 312 remaining `section_fail` are concentrated in ~30 bank/financial tickers
+(JPM, AXP, FITB, HBAN, KEY, NTRS, SYF, CFG, STT, AEP …). Root cause: their
+10-Q MD&A has huge financial tables, and `edgartools`' boundary detection
+loses the next-section terminator (Item 3) when it's hidden inside a table —
+section then runs forward to end-of-doc. The MD&A text balloons to 100-160%
+of the table-stripped full word count, triggering `over_extracted`. The
+sections module correctly flags these; downstream still scores the full text.
 
 ---
 
-## The single action to take when resuming
+## The path to v1 completion
 
-**Diagnose the section_fail concentration in megabanks/megacap industrials.**
-The 1,140 failures aren't random — they're concentrated in ~15 CIKs (banks
-+ a few utilities/tech), 10 of which have 100% fail rate. Suggested
-30-min investigation:
+The tool is functionally working. Three things stand between "works locally"
+and "shippable v1":
 
-1. Pick 3 fully-failing tickers: **JPM (CIK 19617), MS (895421), IBM (51143)**.
-2. Open one filing per ticker:
-   `cat data/sp500/clean/19617/<latest-accession>/sections.json | jq .`
-   to see the failure mode (which section, what error).
-3. Compare the raw filing text (`full.txt`) against `sibyl/sections.py`'s
-   regex anchors. Banks tend to use **"Part II, Item 1A"** ordering in
-   10-Qs (not "Item 1A"), which may trip the existing anchors.
-4. Decide between:
-   - **(a) Add regex variants** in `sections.py` for bank-style ordering. Re-run
-     `sibyl sections --stack sp500 --force` (would re-process ~9,000 filings
-     in 3h, but only fixes the targeted ones).
-   - **(b) Lean on edgartools' `TenQ.Item("1A")`** for the fallback path
-     when our regex returns nothing — accept whatever edgartools gives.
-   - **(c) Accept the loss.** 88% coverage is fine; the chart/diff code
-     handles missing sections gracefully. Add a quality flag to the doc.
+### 1. Install the cron jobs (**required before next session**, ~30 min)
 
-After that, install the two cron jobs per `RESEARCH_TOOL_SPEC.md §8`
-(weekly filings refresh + monthly membership re-check) — currently
-nothing keeps the data fresh.
+The data is current as of 2026-06-21 and will rot without scheduled refresh.
+Per `RESEARCH_TOOL_SPEC.md §8`:
+
+```cron
+# Weekly: pull new S&P filings + re-aggregate (Sunday 04:00 UTC)
+0 4 * * 0 cd /root/sibyl && .venv/bin/sibyl sp500 refresh >> data/logs/cron_weekly.log 2>&1
+
+# Monthly: re-check Wikipedia membership (1st of month, 03:00 UTC)
+0 3 1 * * cd /root/sibyl && .venv/bin/sibyl sp500 refresh --no-download >> data/logs/cron_monthly.log 2>&1
+```
+
+Install on the droplet (`crontab -e` as root). Verify with `crontab -l`.
+First weekly run will be incremental — fast (~5-15 min) since most filings
+are already cached.
+
+**Note**: the weekly cron runs on the droplet's data, NOT the Mac's. After
+each weekly run, rsync the new filings back to the Mac if you want them in
+your local DB. Alternative: run the weekly refresh locally on the Mac via
+launchd (or just run `sibyl sp500 refresh` manually on Sundays). Decide
+based on whether you want the droplet to be the source of truth or the Mac.
+
+### 2. (Optional) Reclaim the bank `over_extracted` cases (~half-day project)
+
+312 filings, mostly bank 10-Q MD&A, are losing their delta-signal because
+`edgartools` over-extracts past the section terminator. Approaches in
+descending difficulty:
+
+- **Post-process trim** (best): after edgartools returns text, search backwards
+  from end for known terminators ("Item 3. Quantitative and Qualitative
+  Disclosures", "Item 4. Controls and Procedures") and truncate. Risk: false
+  positives on filings that mention these phrases elsewhere; mitigate by only
+  trimming when the section is >100K words.
+- **Table-aware extraction** (medium): strip `<table>` blocks from the section
+  text before measuring; if it's then below the over-extracted threshold,
+  promote to `ok`. Won't fix the underlying boundary issue but reclaims the
+  measurement.
+- **Custom extractor for banks** (worst): hard-code RF/MD&A ranges per CIK.
+  Won't generalize.
+
+Recommend the post-process trim. Add as a new `_trim_to_terminator()` in
+`sections.py`, gate behind the existing `over_extracted` detection, bump
+`EXTRACTOR_VERSION` to `"3"`, re-run sections — `--force` not needed since
+version bump triggers reprocessing of the 312 currently-failing filings.
+
+### 3. (Optional) Use the tool for a week before adding features
+
+The temptation will be to build heat maps, sector overlays, multi-ticker
+batch queries, etc. Don't. The 6-panel chart is enough to start using the
+tool, and a week of actual analysis will tell you what to build next better
+than any spec session.
+
+---
+
+## Resume sequence (one command to verify everything still works)
+
+```bash
+cd /Users/wessch/Projects/Projects/sibyl
+.venv/bin/pytest -q                           # expect 158 passed
+.venv/bin/sibyl status                        # expect 9837 filings, 56362 scores
+.venv/bin/sibyl research AAPL --no-download   # writes chart_AAPL_<stamp>.png
+```
+
+If all three pass, you're picking up exactly where this session left off.
 
 ---
 
@@ -198,13 +250,15 @@ sibyl/
 │   └── smoke_sp500.py       # end-to-end smoke on a 20-name subset
 │
 ├── docs/
-│   ├── HANDOVER.md                    # ← this file
-│   ├── RESEARCH_TOOL_SPEC.md          # canonical product spec
-│   ├── SIBYL BUILD SPEC.md            # historical signal-engine spec (banner at top)
-│   ├── parallel_processing.md         # Stage 3 multiprocessing
-│   ├── scaling_10q_with_cloud_vm.md   # droplet runbook (still relevant)
-│   ├── llm_audit_plan.md              # audit pattern (reusable for 10-Q quality)
-│   └── validation_labelling_guide.md  # deferred Layer-3 reference
+│   ├── HANDOVER.md                    # ← this file (active)
+│   ├── RESEARCH_TOOL_SPEC.md          # canonical product spec (active)
+│   └── Aux/                           # historical / less-frequently-needed
+│       ├── SIBYL BUILD SPEC.md        # original signal-engine spec
+│       ├── DROPLET_BACKFILL.md        # one-time backfill runbook (done 2026-06-21)
+│       ├── parallel_processing.md     # Stage 3 multiprocessing notes
+│       ├── scaling_10q_with_cloud_vm.md  # droplet sizing reference
+│       ├── llm_audit_plan.md          # audit pattern (reusable for 10-Q quality)
+│       └── validation_labelling_guide.md  # deferred Layer-3 reference
 │
 ├── tests/                   # 151 passing
 │
@@ -276,12 +330,13 @@ commits.)*
 
 ## Known unknowns (must address eventually)
 
+See "The path to v1 completion" above for the items with clear remediation
+paths (cron install, over_extracted reclaim). The rest are background risks:
+
 | Item | Severity | Notes |
 |---|---|---|
-| **No cron installed yet** | required | Data won't stay fresh without it. `RESEARCH_TOOL_SPEC.md §8` defines: weekly `sibyl sp500 refresh` for new filings; monthly membership re-check. Install on the existing droplet alongside `unicornhunt.service`. |
-| **1,140 section_fails (12% rate), concentrated in megabanks** | medium | Not random — see "Backfill summary" above. Top offenders (100% fail rate, 20/20 filings): BNY, MS, C, EIX, WFC, IBM, INTC, XOM, JPM, AEP. Likely "Part II, Item 1A" vs "Item 1A" anchor mismatch. See "The single action to take when resuming" for the proposed 30-min triage. |
-| **3 CIKs with zero qualifying filings** | low | 500 of 503 S&P members got filings; 3 didn't (probably recent IPOs that postdate the 5y window). Run `SELECT cik FROM sp500_membership WHERE cik NOT IN (SELECT DISTINCT cik FROM filings WHERE stack='sp500');` to identify, then decide whether to widen the window. |
 | **Wikipedia lag** | low | Constituents page is editor-maintained; S&P index changes can show up hours-to-days late. For a monthly-refresh research tool this doesn't matter, but flag if you ever need realtime accuracy. |
+| **3 CIKs with zero qualifying filings** | low | 500 of 503 S&P members got filings; 3 didn't (probably recent IPOs that postdate the 5y window). Run `SELECT cik FROM sp500_membership WHERE cik NOT IN (SELECT DISTINCT cik FROM filings WHERE stack='sp500');` to identify, then decide whether to widen the window. |
 | **Deprecated `Paths.raw` / `Paths.clean` aliases** | very low | About 30 test sites still reference them. They point at sp500_*; removing them requires test refactoring with no functional benefit. Defer until someone has a reason to touch those tests. |
 | **edgartools "legacy parser fallback" warnings** | very low | Chatty WARNING logs during section extraction on older filings (pre-2020-ish). Non-fatal; edgartools still returns the right content. Suppress at logger level if it bothers you. |
 | **edgartools "_tcache" warning** | very low | "Failed to clear locale-corrupted cache" — non-fatal; edgartools internal. |
@@ -311,38 +366,26 @@ This is what the droplet's weekly cron will do. ~4-6h on first run;
 
 ---
 
-## Quick "is everything still wired up" smoke test
-
-```bash
-cd /Users/wessch/Projects/Projects/sibyl
-.venv/bin/pytest -q                           # expect 151 passed
-.venv/bin/sibyl status                        # expect 9837 filings, 51780 scores, 20325 signals
-.venv/bin/sibyl sp500 status                  # expect 503 members
-.venv/bin/sibyl sp500 refresh --no-download   # ~5s; refreshes membership, rebuilds aggregates
-.venv/bin/sibyl research AAPL --no-download   # writes data/queried/AAPL/chart_<stamp>.png
-```
-
-If the membership has changed since the last refresh, Wikipedia will
-reflect it. The chart uses whatever filings are in the DB.
-
----
-
 ## What I'd say if I were the prior Claude
 
-> "The backfill landed clean — 9,837 filings, zero download failures,
-> zero score errors. The interesting next thing is the 1,140 section
-> fails: they're NOT random — 25% are concentrated in just 15 mega-cap
-> CIKs (mostly banks). That's a 30-minute investigation that probably
-> reclaims most of them by adding a couple of regex variants for
-> 'Part II, Item 1A' ordering. Don't go down the LLM-audit path for
-> this — the pattern is obvious enough that a manual look at three
-> JPM/MS/IBM filings will tell you what's needed.
+> "The 30-min diagnosis of the 1,140 'section_fails' turned out to be the
+> whole story: 895 of them were never real failures — they were legitimate
+> 10-Q filings where the filer said 'no material RF changes since the 10-K'
+> (perfectly valid filing pattern, just not extractable as a section).
+> Splitting the binary ok/fail status into ok/partial/section_fail
+> reclassified those correctly and let the score/diff stages pick them up,
+> taking scoring coverage from 88% to 96.8%.
 >
-> Second priority: install the cron. The data is current as of 2026-06-21
-> and will rot without weekly refresh. Until that's installed, every
-> `sibyl research` is reading a frozen-in-time corpus.
+> What's left is genuinely hard: 312 bank/financial filings where
+> edgartools' boundary detection runs past the section terminator
+> because it's hidden inside a financial table. The 'fix' is a
+> post-process trim, not a regex tweak — half a day of careful work to
+> avoid false positives. NOT urgent: full-text scoring still works on
+> these, only the MD&A delta-signal is lost. Reasonable to defer until
+> you actually look at bank charts and notice missing data points.
 >
-> Don't add features yet. The current tool works end-to-end and the
-> next user-visible improvement is more interesting analysis (heat
-> maps, sector overlays) — but that's only worth building once you've
-> actually been *using* the tool for a week and know what's missing."
+> The thing that IS urgent: install the cron jobs. Until they're in,
+> every `sibyl research` query is reading data frozen at 2026-06-21.
+> ~30 min on the droplet (see `Path to v1 completion` step 1).
+>
+> Don't add features yet. Use the tool for a week first."

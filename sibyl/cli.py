@@ -162,6 +162,7 @@ def cmd_sections(args: argparse.Namespace) -> int:
     clean_size = _disk_usage(clean_root)
     log.info("Filings processed:  %d (stack=%s)", counts.processed, args.stack)
     log.info("Sections OK (both): %d", counts.both_ok)
+    log.info("Partial:            %d", counts.partial)
     log.info("section_fail:       %d", counts.section_fail)
     log.info("Suspicious:         %d", counts.suspicious)
     log.info("Skipped:            %d", counts.skipped)

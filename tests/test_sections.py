@@ -105,6 +105,44 @@ def test_section_status_missing():
     assert info["word_count"] == 0
 
 
+# ---- _compute_filing_status (v2 taxonomy) -------------------------------------
+
+def test_filing_status_both_ok():
+    assert sx._compute_filing_status("ok", "ok") == "ok"
+
+
+def test_filing_status_one_ok_one_missing_is_partial():
+    """JPM 10-K pattern: MDNA missing/pointer, RF extracted cleanly."""
+    assert sx._compute_filing_status("ok", "missing") == "partial"
+    assert sx._compute_filing_status("missing", "ok") == "partial"
+
+
+def test_filing_status_one_ok_one_incorp_ref_is_partial():
+    """IBM 10-K pattern: MDNA refers to Annual Report, RF extracted cleanly."""
+    assert sx._compute_filing_status("ok", "incorp_ref") == "partial"
+    assert sx._compute_filing_status("incorp_ref", "ok") == "partial"
+
+
+def test_filing_status_any_over_extracted_is_section_fail():
+    """Boundary detection failure is a real bug, not a legitimate filing pattern."""
+    assert sx._compute_filing_status("ok", "over_extracted") == "section_fail"
+    assert sx._compute_filing_status("over_extracted", "ok") == "section_fail"
+    assert sx._compute_filing_status("over_extracted", "over_extracted") == "section_fail"
+    assert sx._compute_filing_status("missing", "over_extracted") == "section_fail"
+
+
+def test_filing_status_both_unusable_is_section_fail():
+    assert sx._compute_filing_status("missing", "missing") == "section_fail"
+    assert sx._compute_filing_status("incorp_ref", "incorp_ref") == "section_fail"
+    assert sx._compute_filing_status("missing", "incorp_ref") == "section_fail"
+
+
+def test_filing_status_parse_fail_trumps_everything():
+    """If the full text didn't clean, sections are moot."""
+    assert sx._compute_filing_status("ok", "ok", full_status="parse_fail") == "parse_fail"
+    assert sx._compute_filing_status("missing", "missing", full_status="parse_fail") == "parse_fail"
+
+
 @pytest.mark.skipif(
     not (Path("data/raw/320193/0000320193-23-000106/primary.html.gz").exists()
          and Path("data/clean/320193/0000320193-23-000106/sections.json").exists()),
