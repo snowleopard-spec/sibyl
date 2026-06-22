@@ -170,6 +170,45 @@ def test_ticker_series_returns_per_filing_values(conn):
     assert [p["as_of_date"] for p in pts] == ["2024-03-31", "2024-06-30"]
 
 
+def test_rebuild_aggregates_separates_10k_and_10q(conn):
+    """Regression guard: 10-K and 10-Q must bucket separately, else mixing
+    them in a single quarter creates an annual sawtooth in the trend chart
+    (10-K-vs-10-K similarity is structurally higher than 10-Q-vs-10-Q).
+    See aggregate.rebuild_aggregates docstring."""
+    _membership(conn, "AAPL", 1, "IT")
+    _filing(conn, "k1", 1, form_type="10-K", acceptance_dt="2024-02-01T00:00:00Z")
+    _filing(conn, "q1", 1, form_type="10-Q", acceptance_dt="2024-02-15T00:00:00Z")
+    _signal(conn, "k1", 1, section="risk_factors", similarity=0.95)
+    _signal(conn, "q1", 1, section="risk_factors", similarity=0.75)
+    conn.commit()
+    agg.rebuild_aggregates(conn)
+
+    k_series = agg.aggregate_series(
+        conn, scope="sp500", section="risk_factors",
+        metric="similarity_yoy", form_type="10-K",
+    )
+    q_series = agg.aggregate_series(
+        conn, scope="sp500", section="risk_factors",
+        metric="similarity_yoy", form_type="10-Q",
+    )
+    assert len(k_series) == 1 and k_series[0]["mean"] == pytest.approx(0.95)
+    assert len(q_series) == 1 and q_series[0]["mean"] == pytest.approx(0.75)
+
+
+def test_ticker_series_filters_by_form_type(conn):
+    _membership(conn, "AAPL", 1, "IT")
+    _filing(conn, "k1", 1, form_type="10-K", acceptance_dt="2024-02-01T00:00:00Z")
+    _filing(conn, "q1", 1, form_type="10-Q", acceptance_dt="2024-05-01T00:00:00Z")
+    _signal(conn, "k1", 1, section="mdna", d_neg=0.001)
+    _signal(conn, "q1", 1, section="mdna", d_neg=0.005)
+    conn.commit()
+
+    k_only = agg.ticker_series(conn, 1, section="mdna", metric="d_neg", form_type="10-K")
+    q_only = agg.ticker_series(conn, 1, section="mdna", metric="d_neg", form_type="10-Q")
+    assert [p["accession"] for p in k_only] == ["k1"]
+    assert [p["accession"] for p in q_only] == ["q1"]
+
+
 def test_status_reports_counts(conn):
     _membership(conn, "AAPL", 1, "IT")
     _filing(conn, "a", 1)

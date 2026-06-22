@@ -55,11 +55,14 @@ def render_chart(
     sector: str | None,
     output_path: Path,
     title_suffix: str = "",
+    form_type: str = "10-K",
 ) -> Path:
     """Render the 6-panel comparison chart for `ticker` (CIK `cik`).
 
     `sector` is the S&P sector for the ticker if known; if None, the
-    sector-average line is skipped.
+    sector-average line is skipped. `form_type` defaults to '10-K' (annual
+    filings give a clean trend; 10-K/10-Q similarity differ structurally and
+    must be charted separately — see aggregate.rebuild_aggregates).
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,8 +78,10 @@ def render_chart(
         for col, metric in enumerate(METRICS):
             ax = axes[row][col]
 
-            # Queried ticker series.
-            ticker_pts = agg_mod.ticker_series(conn, cik, section=section, metric=metric)
+            # Queried ticker series (filtered to the chart's form_type).
+            ticker_pts = agg_mod.ticker_series(
+                conn, cik, section=section, metric=metric, form_type=form_type,
+            )
             t_dates = _to_dates([p["as_of_date"] for p in ticker_pts])
             t_vals = [p["value"] for p in ticker_pts if p["value"] is not None]
             if t_dates and t_vals and len(t_dates) == len(t_vals):
@@ -86,7 +91,7 @@ def render_chart(
             # Sector mean.
             if sector:
                 sec_pts = agg_mod.aggregate_series(
-                    conn, scope=sector, section=section, metric=metric,
+                    conn, scope=sector, section=section, metric=metric, form_type=form_type,
                 )
                 s_dates = _to_dates([p["as_of_date"] for p in sec_pts])
                 s_vals = [p["mean"] for p in sec_pts]
@@ -96,7 +101,7 @@ def render_chart(
 
             # S&P 500 mean.
             sp_pts = agg_mod.aggregate_series(
-                conn, scope="sp500", section=section, metric=metric,
+                conn, scope="sp500", section=section, metric=metric, form_type=form_type,
             )
             sp_dates = _to_dates([p["as_of_date"] for p in sp_pts])
             sp_vals = [p["mean"] for p in sp_pts]
@@ -115,7 +120,7 @@ def render_chart(
             if row == 0 and col == 0:
                 ax.legend(loc="best", fontsize=8)
 
-    title = f"{ticker} vs S&P 500 sentiment signals"
+    title = f"{ticker} vs S&P 500 sentiment signals ({form_type} only)"
     if sector:
         title += f" (Sector: {sector})"
     if title_suffix:
@@ -132,3 +137,107 @@ def chart_filename(ticker: str, *, stamp: str | None = None) -> str:
     """Stable per-query filename: chart_<TICKER>_<UTCstamp>.png."""
     stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"chart_{ticker}_{stamp}.png"
+
+
+def render_sp500_chart(
+    conn: sqlite3.Connection,
+    *,
+    output_path: Path,
+    sectors: list[str] | None = None,
+    title_suffix: str = "",
+    form_type: str = "10-K",
+) -> Path:
+    """Render a 6-panel S&P 500 aggregate trend chart.
+
+    Each panel = one (section, metric) pair. Lines per panel:
+      - All 11 GICS sectors as thin colored lines (categorical colormap)
+      - S&P 500 mean as a bold black line on top
+
+    `sectors` overrides the sector list (default: all sectors present in
+    sp500_membership). `form_type` defaults to '10-K' for a clean annual
+    trend (mixing 10-K and 10-Q creates an annual sawtooth — see
+    aggregate.rebuild_aggregates).
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if sectors is None:
+        sectors = [
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT sector FROM sp500_membership "
+                "WHERE sector IS NOT NULL AND sector != '' ORDER BY sector"
+            )
+        ]
+
+    fig, axes = plt.subplots(
+        len(SECTIONS), len(METRICS),
+        figsize=(16, 8), sharex=True,
+    )
+    if len(SECTIONS) == 1:
+        axes = [axes]
+
+    cmap = plt.get_cmap("tab20")
+
+    for row, section in enumerate(SECTIONS):
+        for col, metric in enumerate(METRICS):
+            ax = axes[row][col]
+
+            # Sector lines (thin, semi-transparent so the S&P line reads above them).
+            for i, sector in enumerate(sectors):
+                pts = agg_mod.aggregate_series(
+                    conn, scope=sector, section=section, metric=metric, form_type=form_type,
+                )
+                if not pts:
+                    continue
+                dates = _to_dates([p["as_of_date"] for p in pts])
+                vals = [p["mean"] for p in pts]
+                if not (dates and vals and len(dates) == len(vals)):
+                    continue
+                ax.plot(
+                    dates, vals, "-",
+                    color=cmap(i % 20),
+                    linewidth=1.0, alpha=0.65,
+                    label=sector if (row == 0 and col == 0) else None,
+                )
+
+            # S&P 500 mean — heavy black line on top so it always reads.
+            sp_pts = agg_mod.aggregate_series(
+                conn, scope="sp500", section=section, metric=metric, form_type=form_type,
+            )
+            sp_dates = _to_dates([p["as_of_date"] for p in sp_pts])
+            sp_vals = [p["mean"] for p in sp_pts]
+            if sp_dates and sp_vals and len(sp_dates) == len(sp_vals):
+                ax.plot(
+                    sp_dates, sp_vals, "-",
+                    color="black", linewidth=2.5,
+                    label=("S&P 500" if (row == 0 and col == 0) else None),
+                )
+
+            ax.set_title(
+                f"{SECTION_LABELS[section]} · {METRIC_LABELS[metric]}", fontsize=10,
+            )
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(axis="x", rotation=30, labelsize=8)
+            ax.tick_params(axis="y", labelsize=8)
+            if row == len(SECTIONS) - 1:
+                ax.xaxis.set_major_locator(mdates.YearLocator())
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+
+    # Single figure-level legend on the right so panels stay clean.
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles, labels,
+            loc="center right", fontsize=8, frameon=True,
+            bbox_to_anchor=(1.0, 0.5),
+        )
+
+    title = f"S&P 500 sentiment trends — sector breakdown ({form_type} only)"
+    if title_suffix:
+        title += f"  —  {title_suffix}"
+    fig.suptitle(title, fontsize=12, y=0.995)
+    fig.tight_layout(rect=(0, 0, 0.86, 0.97))
+    fig.savefig(output_path, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Wrote chart: %s", output_path)
+    return output_path

@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import chart as chart_mod
 from . import config as config_mod
 from . import db as db_mod
 from . import download as download_mod
@@ -276,11 +277,39 @@ def cmd_research(args: argparse.Namespace) -> int:
             cfg, conn, args.ticker,
             download=not args.no_download,
             chart=not args.no_chart,
+            form_type=args.form_type,
         )
     except LookupError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     print(runner_mod.render_query_summary(summary))
+    return 0
+
+
+def cmd_chart_sp500(args: argparse.Namespace) -> int:
+    cfg = config_mod.load_config(args.config)
+    config_mod.ensure_dirs(cfg)
+    _configure_logging(cfg.paths.logs)
+    conn = db_mod.connect(cfg.paths.db)
+    db_mod.init_schema(conn)
+
+    n_agg = conn.execute("SELECT COUNT(*) FROM sp500_aggregates").fetchone()[0]
+    if n_agg == 0:
+        print(
+            "sp500_aggregates is empty. Run `sibyl sp500 refresh --no-download` "
+            "first to populate it.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.output:
+        out_path = Path(args.output)
+    else:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        out_path = cfg.paths.queried_raw.parent / f"chart_sp500_{stamp}.png"
+
+    chart_mod.render_sp500_chart(conn, output_path=out_path, form_type=args.form_type)
+    print(f"Wrote: {out_path}")
     return 0
 
 
@@ -426,7 +455,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-chart", action="store_true",
         help="Skip PNG chart rendering; return summary JSON to stdout.",
     )
+    p_research.add_argument(
+        "--form-type", choices=("10-K", "10-Q"), default="10-K",
+        help="Filing type to chart (default: 10-K for clean annual trend).",
+    )
     p_research.set_defaults(func=cmd_research)
+
+    p_chart_sp500 = sub.add_parser(
+        "chart-sp500",
+        help="Render a 6-panel S&P 500 aggregate trend chart (all sectors + S&P mean).",
+    )
+    p_chart_sp500.add_argument(
+        "--output", help="PNG output path (default: data/queried/chart_sp500_<stamp>.png).",
+    )
+    p_chart_sp500.add_argument(
+        "--form-type", choices=("10-K", "10-Q"), default="10-K",
+        help="Filing type to chart (default: 10-K for clean annual trend).",
+    )
+    p_chart_sp500.set_defaults(func=cmd_chart_sp500)
 
     p_queried = sub.add_parser(
         "queried", help="Inspect the queried-stack cache (tickers fetched on demand).",

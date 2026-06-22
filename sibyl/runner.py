@@ -148,6 +148,7 @@ def query(
     download: bool = True,
     chart: bool = True,
     output_dir: Path | None = None,
+    form_type: str = "10-K",
 ) -> dict:
     """End-to-end query workflow: resolve, fetch (or cross-ref), chart.
 
@@ -176,6 +177,7 @@ def query(
             sector=result.sector,
             output_path=chart_path,
             title_suffix=f"{summary['filings_count']} filings · stack={result.stack}",
+            form_type=form_type,
         )
     summary["chart_path"] = str(chart_path) if chart_path else None
     summary["finished_at"] = _utc_now()

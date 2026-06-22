@@ -56,12 +56,16 @@ def rebuild_aggregates(conn: sqlite3.Connection) -> int:
     """
     cur = conn.cursor()
 
-    # Pull every (filing × section × metric) value tagged with its sector +
-    # acceptance quarter. One row per (accession, section).
+    # Pull every (filing × section × metric) value tagged with its sector,
+    # acceptance quarter, and form_type. Buckets are then keyed by form_type
+    # so 10-K and 10-Q similarity (structurally different — 10-K-vs-10-K has
+    # higher boilerplate carryover) never pool together. Pooling them caused
+    # an annual sawtooth in the trend charts; that's the bug being fixed here.
     rows = list(cur.execute(
         """
         SELECT
             s.acceptance_dt           AS acceptance_dt,
+            s.form_type               AS form_type,
             m.sector                  AS sector,
             sig.section               AS section,
             sig.similarity_yoy        AS similarity_yoy,
@@ -75,39 +79,40 @@ def rebuild_aggregates(conn: sqlite3.Connection) -> int:
         """
     ))
 
-    # Bucket: { (as_of_date, scope, section, metric) → [values] }
-    buckets: dict[tuple[str, str, str, str], list[float]] = defaultdict(list)
+    # Bucket: { (as_of_date, scope, section, metric, form_type) → [values] }
+    buckets: dict[tuple[str, str, str, str, str], list[float]] = defaultdict(list)
     for r in rows:
         as_of = _quarter_end_date(r["acceptance_dt"] or "")
         if not as_of:
             continue
         section = r["section"]
         sector = (r["sector"] or "(unknown)").strip() or "(unknown)"
+        form_type = r["form_type"] or "?"
         for metric in CHART_METRICS:
             value = r[metric]
             if value is None:
                 continue
-            # S&P-wide scope.
-            buckets[(as_of, "sp500", section, metric)].append(float(value))
-            # Sector scope.
-            buckets[(as_of, sector, section, metric)].append(float(value))
+            buckets[(as_of, "sp500", section, metric, form_type)].append(float(value))
+            buckets[(as_of, sector, section, metric, form_type)].append(float(value))
 
-    # Wipe + insert.
     cur.execute("DELETE FROM sp500_aggregates")
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     insert_rows = []
-    for (as_of, scope, section, metric), values in buckets.items():
+    for (as_of, scope, section, metric, form_type), values in buckets.items():
         if not values:
             continue
         mean = statistics.fmean(values)
         median = statistics.median(values)
-        insert_rows.append((as_of, scope, section, metric, mean, median, len(values), now))
+        insert_rows.append(
+            (as_of, scope, section, metric, form_type, mean, median, len(values), now),
+        )
 
     if insert_rows:
         cur.executemany(
             "INSERT INTO sp500_aggregates "
-            "(as_of_date, scope, section, metric, mean_value, median_value, n_filings, computed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(as_of_date, scope, section, metric, form_type, "
+            " mean_value, median_value, n_filings, computed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             insert_rows,
         )
     conn.commit()
@@ -121,10 +126,14 @@ def aggregate_series(
     scope: str,
     section: str,
     metric: str,
+    form_type: str = "10-K",
 ) -> list[dict]:
     """Return time-series rows [{as_of_date, mean, median, n}, ...] sorted by date.
 
-    `scope` is either 'sp500' or a sector name. Empty list when nothing matches.
+    `scope` is either 'sp500' or a sector name. `form_type` defaults to '10-K'
+    because annual filings give the cleanest trend (no quarterly sawtooth from
+    10-K/10-Q similarity mixing — see rebuild_aggregates docstring).
+    Pass '10-Q' to view quarterly trends; the data is bucketed separately.
     """
     return [
         {
@@ -136,9 +145,9 @@ def aggregate_series(
         for r in conn.execute(
             "SELECT as_of_date, mean_value, median_value, n_filings "
             "FROM sp500_aggregates "
-            "WHERE scope = ? AND section = ? AND metric = ? "
+            "WHERE scope = ? AND section = ? AND metric = ? AND form_type = ? "
             "ORDER BY as_of_date",
-            (scope, section, metric),
+            (scope, section, metric, form_type),
         )
     ]
 
@@ -150,12 +159,14 @@ def ticker_series(
     section: str,
     metric: str,
     stack: str | None = None,
+    form_type: str | None = None,
 ) -> list[dict]:
     """Per-filing series for a single CIK + section + metric.
 
     Returns [{as_of_date, value, accession}, ...] sorted by acceptance.
     `stack` is optional; default None searches both stacks (lets cross-ref
     queries pull from sp500-stack rows when applicable).
+    `form_type` is optional; default None returns both 10-K and 10-Q rows.
     """
     metric_col = {
         "d_neg": "sig.d_neg",
@@ -167,6 +178,9 @@ def ticker_series(
     if stack is not None:
         where.append("f.stack = ?")
         params.append(stack)
+    if form_type is not None:
+        where.append("f.form_type = ?")
+        params.append(form_type)
     sql = (
         f"SELECT f.acceptance_dt AS acceptance_dt, sig.accession AS accession, "
         f"{metric_col} AS value "

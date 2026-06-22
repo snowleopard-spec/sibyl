@@ -79,3 +79,19 @@ def test_render_chart_handles_empty_data(conn, tmp_path):
         conn, ticker="EMPTY", cik=0, sector=None, output_path=out,
     )
     assert out.exists()
+
+
+def test_render_sp500_chart_writes_png(conn, tmp_path):
+    _seed(conn)
+    out = tmp_path / "sp500.png"
+    result = chart.render_sp500_chart(conn, output_path=out)
+    assert result == out
+    assert out.exists()
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_render_sp500_chart_handles_empty_corpus(conn, tmp_path):
+    """No aggregates → still produces a PNG (empty panels)."""
+    out = tmp_path / "sp500.png"
+    chart.render_sp500_chart(conn, output_path=out)
+    assert out.exists()

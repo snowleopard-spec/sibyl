@@ -40,13 +40,14 @@ CREATE TABLE IF NOT EXISTS sp500_aggregates (
     scope         TEXT NOT NULL,
     section       TEXT NOT NULL,
     metric        TEXT NOT NULL,
+    form_type     TEXT NOT NULL DEFAULT '10-K',
     mean_value    REAL,
     median_value  REAL,
     n_filings     INTEGER,
     computed_at   TEXT,
-    PRIMARY KEY (as_of_date, scope, section, metric)
+    PRIMARY KEY (as_of_date, scope, section, metric, form_type)
 );
-CREATE INDEX IF NOT EXISTS idx_sp500_agg_scope ON sp500_aggregates(scope, section, metric);
+CREATE INDEX IF NOT EXISTS idx_sp500_agg_scope ON sp500_aggregates(scope, section, metric, form_type);
 
 CREATE TABLE IF NOT EXISTS filing_scores (
     accession      TEXT NOT NULL,
@@ -95,6 +96,15 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
+    # Pre-migration: legacy sp500_aggregates lacked form_type in its PK. Since
+    # the table is purely derived (rebuilt from filing_signals by aggregate
+    # module), the safe migration is to drop it; next rebuild_aggregates() call
+    # repopulates with the new schema.
+    cur = conn.execute("PRAGMA table_info(sp500_aggregates)")
+    cols = [row[1] for row in cur.fetchall()]
+    if cols and "form_type" not in cols:
+        conn.execute("DROP TABLE sp500_aggregates")
+
     conn.executescript(SCHEMA)
     # Idempotent column-additions for older DBs created before a column existed.
     _ensure_column(conn, "filing_scores", "scorer_version", "TEXT NOT NULL DEFAULT '1'")
