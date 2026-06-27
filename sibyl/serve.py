@@ -53,38 +53,59 @@ def _filings_for_ticker(detail: pd.DataFrame) -> list[dict]:
     ]
 
 
-def _build_decile_rows(df: pd.DataFrame, section_col: str, detail_by_ticker: dict) -> dict:
+def _build_decile_rows(df: pd.DataFrame, section_col: str) -> dict:
     """Return {1: [...], 2: [...], ..., 10: [...]} sorted within each decile
-    by mean_neg descending (rank 1 = most negative in decile)."""
+    by mean_neg descending (rank 1 = most negative in decile).
+
+    Filing detail is NOT embedded in row dicts — it goes in a separate
+    JSON data island so the page stays small (~500KB instead of ~10MB)
+    and detail subtables build lazily on click.
+    """
     out: dict[int, list[dict]] = {n: [] for n in range(1, 11)}
     mean_col = f"mean_neg_{section_col}"
     fcount_col = f"filing_count_{section_col}"
     decile_col = f"decile_{section_col}"
 
+    eligible = df[df[decile_col].notna()]
     for decile in range(1, 11):
-        sub = df[df[decile_col] == decile].sort_values(mean_col, ascending=False)
+        sub = eligible[eligible[decile_col] == decile].sort_values(mean_col, ascending=False)
         for rank, (_, row) in enumerate(sub.iterrows(), start=1):
-            ticker = row["ticker"]
             out[decile].append({
                 "rank": rank,
-                "ticker": ticker,
+                "ticker": row["ticker"],
                 "name": row["name"] or "",
                 "sector": row["sector"] or "",
                 "sector_colour": SECTOR_COLOURS.get(row["sector"], DEFAULT_COLOUR),
                 "mean_neg": float(row[mean_col]),
                 "filing_count": int(row[fcount_col]),
-                "filings": detail_by_ticker.get(ticker, []),
             })
     return out
+
+
+DISPLAYED_DECILES = (10, 1)
+DECILE_LABELS = {
+    10: "Decile 10 — most negative",
+    1: "Decile 1 — least negative",
+}
 
 
 def build_report_context(conn) -> dict:
     df = rank_mod.compute_ranks(conn)
 
+    deciles_mdna = _build_decile_rows(df, "mdna") if not df.empty else {n: [] for n in range(1, 11)}
+    deciles_risk = _build_decile_rows(df, "risk") if not df.empty else {n: [] for n in range(1, 11)}
+    deciles = {n: {"mdna": deciles_mdna[n], "risk": deciles_risk[n]} for n in DISPLAYED_DECILES}
+
+    # Only ship filing detail for tickers that actually appear on the page.
+    visible_tickers: set[str] = set()
+    for n in DISPLAYED_DECILES:
+        for which in ("mdna", "risk"):
+            for r in deciles[n][which]:
+                visible_tickers.add(r["ticker"])
+
     detail_by_ticker: dict[str, list[dict]] = {}
-    if not df.empty:
-        tickers = df["ticker"].tolist()
-        placeholders = ",".join("?" * len(tickers))
+    if visible_tickers:
+        placeholders = ",".join("?" * len(visible_tickers))
         sql = f"""
             SELECT m.ticker, fs.accession, f.acceptance_dt, f.period_of_report,
                    fs.section, fs.neg, fs.total_words
@@ -97,16 +118,15 @@ def build_report_context(conn) -> dict:
               AND fs.section IN ('mdna', 'risk_factors')
             ORDER BY m.ticker, f.acceptance_dt DESC, fs.section
         """
-        per_ticker = pd.read_sql_query(sql, conn, params=tickers)
+        per_ticker = pd.read_sql_query(sql, conn, params=sorted(visible_tickers))
         for ticker, group in per_ticker.groupby("ticker"):
             detail_by_ticker[ticker] = _filings_for_ticker(group)
 
-    deciles_mdna = _build_decile_rows(df, "mdna", detail_by_ticker) if not df.empty else {n: [] for n in range(1, 11)}
-    deciles_risk = _build_decile_rows(df, "risk", detail_by_ticker) if not df.empty else {n: [] for n in range(1, 11)}
-    deciles = {n: {"mdna": deciles_mdna[n], "risk": deciles_risk[n]} for n in range(1, 11)}
-
     return {
         "deciles": deciles,
+        "displayed_deciles": DISPLAYED_DECILES,
+        "decile_labels": DECILE_LABELS,
+        "detail_by_ticker": detail_by_ticker,
         "sector_colours": SECTOR_COLOURS,
         "score_summary": {
             "mdna": {
@@ -125,6 +145,10 @@ def create_app(*, config_path: str | Path = "config.yaml") -> Flask:
     cfg = config_mod.load_config(str(config_path))
     template_dir = Path(__file__).resolve().parent.parent / "templates"
     app = Flask(__name__, template_folder=str(template_dir))
+
+    @app.route("/ping")
+    def ping():
+        return "<!DOCTYPE html><html><body><h1>PONG</h1><p>Flask is reaching your browser.</p></body></html>"
 
     @app.route("/")
     def index():

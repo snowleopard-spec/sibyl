@@ -180,8 +180,8 @@
   <aside class="sidebar">
     <h2>Deciles</h2>
     <ul id="decile-nav">
-      {% for n in range(1, 11) %}
-      <li><a href="#decile-{{ n }}" data-target="decile-{{ n }}">Decile {{ n }}</a></li>
+      {% for n in displayed_deciles %}
+      <li><a href="#decile-{{ n }}" data-target="decile-{{ n }}">{{ decile_labels[n] }}</a></li>
       {% endfor %}
     </ul>
   </aside>
@@ -223,10 +223,10 @@
       </div>
     </div>
 
-    {% for n in range(1, 11) %}
+    {% for n in displayed_deciles %}
     {% set decile = deciles[n] %}
     <section class="decile" id="decile-{{ n }}">
-      <h2>Decile {{ n }}</h2>
+      <h2>{{ decile_labels[n] }}</h2>
       <div class="tables">
         {% for which, label in [("mdna", "MD&A"), ("risk", "Risk Factors")] %}
         <div class="table-block">
@@ -245,7 +245,7 @@
             </thead>
             <tbody>
             {% for row in decile[which] %}
-              <tr class="row" data-toggle="d{{ n }}-{{ which }}-{{ loop.index }}">
+              <tr class="row" data-ticker="{{ row.ticker }}" data-toggle="d{{ n }}-{{ which }}-{{ loop.index }}">
                 <td class="num">{{ row.rank }}</td>
                 <td class="ticker-cell mono" style="border-left-color: {{ row.sector_colour }};">{{ row.ticker }}</td>
                 <td>{{ row.name }}</td>
@@ -254,34 +254,7 @@
                 <td class="num">{{ row.filing_count }}</td>
               </tr>
               <tr class="detail" id="d{{ n }}-{{ which }}-{{ loop.index }}">
-                <td colspan="6">
-                  {% if row.filings %}
-                  <table class="subfilings">
-                    <thead>
-                      <tr>
-                        <th>Filing Date</th>
-                        <th>Period</th>
-                        <th>Section</th>
-                        <th class="num">Neg</th>
-                        <th class="num">Words</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                    {% for f in row.filings %}
-                      <tr>
-                        <td class="mono">{{ f.acceptance_dt }}</td>
-                        <td class="mono">{{ f.period_of_report }}</td>
-                        <td><span class="section-label">{{ f.section }}</span></td>
-                        <td class="num neg">{{ "%.5f"|format(f.neg) if f.neg is not none else "—" }}</td>
-                        <td class="num words">{{ f.total_words if f.total_words is not none else "—" }}</td>
-                      </tr>
-                    {% endfor %}
-                    </tbody>
-                  </table>
-                  {% else %}
-                  <div class="empty">no filing detail</div>
-                  {% endif %}
-                </td>
+                <td colspan="6" class="detail-slot"></td>
               </tr>
             {% endfor %}
             </tbody>
@@ -297,12 +270,42 @@
   </main>
 </div>
 
+<script type="application/json" id="filings-data">{{ detail_by_ticker|tojson }}</script>
 <script>
-  // Expand/collapse filing detail on row click.
+  var FILINGS = JSON.parse(document.getElementById('filings-data').textContent);
+
+  function buildSubtable(filings) {
+    if (!filings || !filings.length) {
+      return '<div class="empty">no filing detail</div>';
+    }
+    var rows = filings.map(function (f) {
+      var neg = f.neg == null ? '—' : f.neg.toFixed(5);
+      var words = f.total_words == null ? '—' : f.total_words;
+      return '<tr>' +
+        '<td class="mono">' + (f.acceptance_dt || '') + '</td>' +
+        '<td class="mono">' + (f.period_of_report || '') + '</td>' +
+        '<td><span class="section-label">' + f.section + '</span></td>' +
+        '<td class="num neg">' + neg + '</td>' +
+        '<td class="num words">' + words + '</td>' +
+        '</tr>';
+    }).join('');
+    return '<table class="subfilings">' +
+      '<thead><tr><th>Filing Date</th><th>Period</th><th>Section</th>' +
+      '<th class="num">Neg</th><th class="num">Words</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table>';
+  }
+
+  // Expand/collapse filing detail on row click, populating lazily.
   document.querySelectorAll('tr.row[data-toggle]').forEach(function (row) {
     row.addEventListener('click', function () {
       var target = document.getElementById(row.dataset.toggle);
-      if (target) target.classList.toggle('open');
+      if (!target) return;
+      var slot = target.querySelector('.detail-slot');
+      if (slot && !slot.dataset.loaded) {
+        slot.innerHTML = buildSubtable(FILINGS[row.dataset.ticker]);
+        slot.dataset.loaded = '1';
+      }
+      target.classList.toggle('open');
     });
   });
 

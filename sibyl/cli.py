@@ -276,9 +276,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Which section's decile to sort by (default: mdna).")
     p_rank.set_defaults(func=cmd_rank)
 
-    p_serve = sub.add_parser("serve", help="Start local Flask report at http://localhost:5000.")
+    # Default to 8080: macOS reserves port 5000 for AirPlay Receiver on
+    # the IPv6 loopback, which silently swallows browser GETs to
+    # `localhost:5000` and returns an empty body (page renders blank).
+    p_serve = sub.add_parser("serve", help="Start local Flask report at http://localhost:8080.")
     p_serve.add_argument("--host", default="127.0.0.1")
-    p_serve.add_argument("--port", type=int, default=5000)
+    p_serve.add_argument("--port", type=int, default=8080)
     p_serve.add_argument("--debug", action="store_true")
     p_serve.set_defaults(func=cmd_serve)
 

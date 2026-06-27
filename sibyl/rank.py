@@ -13,6 +13,14 @@ import pandas as pd
 SECTIONS = ("mdna", "risk_factors")
 MIN_FILINGS_PER_SECTION = 2
 
+# Filings whose section is shorter than this are treated as boilerplate
+# stubs (e.g. 10-Q Risk Factors that just says "no material changes from
+# the prior 10-K") and excluded from the mean before deciling. Without
+# this filter, ~15% of S&P 500 constituents collapse into Risk decile 1
+# tied at neg=0 because their 10-Q Item 1A is a single boilerplate
+# sentence rather than substantive risk disclosure.
+MIN_WORDS_PER_FILING = 200
+
 
 def compute_ranks(conn: sqlite3.Connection, *, n_filings: int = 4) -> pd.DataFrame:
     """Return one row per ticker with mean neg scores and deciles.
@@ -38,6 +46,7 @@ def compute_ranks(conn: sqlite3.Connection, *, n_filings: int = 4) -> pd.DataFra
             WHERE f.form_type = '10-Q'
               AND fs.weighting = 'proportional'
               AND fs.section IN ('mdna', 'risk_factors')
+              AND fs.total_words >= ?
         )
         SELECT ticker, name, sector, section,
                AVG(neg) AS mean_neg,
@@ -46,7 +55,7 @@ def compute_ranks(conn: sqlite3.Connection, *, n_filings: int = 4) -> pd.DataFra
         WHERE rn <= ?
         GROUP BY ticker, name, sector, section
     """
-    long = pd.read_sql_query(sql, conn, params=(n_filings,))
+    long = pd.read_sql_query(sql, conn, params=(MIN_WORDS_PER_FILING, n_filings))
     if long.empty:
         return pd.DataFrame(
             columns=[
@@ -80,11 +89,15 @@ def compute_ranks(conn: sqlite3.Connection, *, n_filings: int = 4) -> pd.DataFra
     wide["filing_count_mdna"] = wide["filing_count_mdna"].fillna(0).astype(int)
     wide["filing_count_risk"] = wide["filing_count_risk"].fillna(0).astype(int)
 
-    eligible = (
-        (wide["filing_count_mdna"] >= MIN_FILINGS_PER_SECTION)
-        & (wide["filing_count_risk"] >= MIN_FILINGS_PER_SECTION)
-    )
-    wide = wide.loc[eligible].copy()
+    # Per-section eligibility: a ticker can be ranked in one section even
+    # if it has no substantive filings in the other. (Many S&P 500 10-Qs
+    # carry a boilerplate Risk Factors stub — those tickers should still
+    # appear in the MD&A ranking.)
+    mdna_ok = wide["filing_count_mdna"] >= MIN_FILINGS_PER_SECTION
+    risk_ok = wide["filing_count_risk"] >= MIN_FILINGS_PER_SECTION
+    wide = wide.loc[mdna_ok | risk_ok].copy()
+    wide.loc[~mdna_ok, "mean_neg_mdna"] = pd.NA
+    wide.loc[~risk_ok, "mean_neg_risk"] = pd.NA
 
     wide["decile_mdna"] = _qcut_deciles(wide["mean_neg_mdna"])
     wide["decile_risk"] = _qcut_deciles(wide["mean_neg_risk"])
@@ -100,14 +113,16 @@ def compute_ranks(conn: sqlite3.Connection, *, n_filings: int = 4) -> pd.DataFra
 
 
 def _qcut_deciles(values: pd.Series) -> pd.Series:
-    """Decile labels 1-10 via pd.qcut, tolerant of tied bin edges.
+    """Decile labels 1-10 via pd.qcut, tolerant of tied bin edges + NaN.
 
     With duplicates='drop' you cannot also pin labels=range(1, 11): if any
     bin edges collapse, pandas raises. Use unlabelled bins instead and
-    shift to 1-based, then forward-cast to int.
+    shift to 1-based, then forward-cast (NaN-aware Int64) so tickers with
+    a NaN section mean stay NaN in the output rather than being
+    coerced or dropped.
     """
     codes = pd.qcut(values, q=10, labels=False, duplicates="drop")
-    return (codes + 1).astype(int)
+    return (codes + 1).astype("Int64")
 
 
 def get_filing_detail(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
