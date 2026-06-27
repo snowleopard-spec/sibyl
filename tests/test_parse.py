@@ -158,6 +158,63 @@ def test_parse_all_writes_status_and_skips_existing(tmp_path, fixture_html, conn
     assert counts3.parsed == 2
 
 
+def test_parse_all_workers_2_matches_workers_1(tmp_path, fixture_html, conn):
+    """The parallel path must produce identical DB state to the inline path."""
+    cfg = _make_cfg(tmp_path)
+    for cik in (10, 20, 30, 40):
+        acc = f"00000000{cik:02d}-23-000001"
+        d = cfg.paths.raw / str(cik) / acc
+        d.mkdir(parents=True)
+        with gzip.open(d / "primary.html.gz", "wb") as f:
+            f.write(fixture_html)
+        conn.execute(
+            "INSERT INTO filings(accession, cik, form_type, acceptance_dt, raw_path, downloaded_at) "
+            "VALUES (?, ?, '10-K', '2023-11-02T18:08:38Z', ?, '2026-06-14T00:00:00Z')",
+            (acc, cik, f"raw/{cik}/{acc}/primary.html.gz"),
+        )
+    conn.commit()
+
+    # Pass 1: inline path (workers=1).
+    counts_serial = ps.parse_all(conn, cfg, workers=1)
+    serial_state = list(conn.execute(
+        "SELECT accession, parse_status FROM filings ORDER BY accession"
+    ))
+    serial_sections = {}
+    for row in serial_state:
+        sections_path = cfg.paths.clean / str(row[0].split("-")[0].lstrip("0")) / row[0] / "sections.json"
+        # Build a normalised structure for comparison (strip timestamps).
+        if sections_path.exists():
+            data = json.loads(sections_path.read_text())
+            data.pop("parsed_at", None)
+            serial_sections[row[0]] = data
+
+    # Pass 2: re-parse via the worker-pool path (workers=2). Same content
+    # on disk, so outcomes must match modulo timestamps.
+    counts_parallel = ps.parse_all(conn, cfg, force=True, workers=2)
+    parallel_state = list(conn.execute(
+        "SELECT accession, parse_status FROM filings ORDER BY accession"
+    ))
+    parallel_sections = {}
+    for row in parallel_state:
+        sections_path = cfg.paths.clean / str(row[0].split("-")[0].lstrip("0")) / row[0] / "sections.json"
+        if sections_path.exists():
+            data = json.loads(sections_path.read_text())
+            data.pop("parsed_at", None)
+            parallel_sections[row[0]] = data
+
+    assert counts_serial.parsed == counts_parallel.parsed == 4
+    assert counts_serial.failed == counts_parallel.failed == 0
+    assert [r["parse_status"] for r in serial_state] == [r["parse_status"] for r in parallel_state]
+    assert serial_sections == parallel_sections
+
+
+def test_parse_all_rejects_unknown_stack(tmp_path, conn):
+    """Bad stack arg fails loud before any work happens."""
+    cfg = _make_cfg(tmp_path)
+    with pytest.raises(ValueError, match="unknown stack"):
+        ps.parse_all(conn, cfg, stack="bogus")
+
+
 def test_parse_all_filters_by_cik(tmp_path, fixture_html, conn):
     cfg = _make_cfg(tmp_path)
     for cik in (1, 2):
@@ -237,28 +294,13 @@ def test_pick_samples_excludes_suspicious_by_default(tmp_path, fixture_html, con
 # --- helpers ---
 
 def _make_cfg(tmp_path: Path):
-    from sibyl.config import Config, Paths, SecConfig, UnicornConfig, UniverseConfig
-    data_root = tmp_path
-    paths = Paths(
-        data_root=data_root,
-        raw=data_root / "raw",
-        clean=data_root / "clean",
-        logs=data_root / "logs",
-        snapshots=data_root / "universe_snapshots",
-        universe_json=data_root / "universe.json",
-        db=data_root / "sibyl.db",
-        company_tickers=data_root / "company_tickers.json",
-        lm_dictionary=data_root / "lm_master_dictionary.csv",
-        prices=data_root / "prices",
-        exports=data_root / "exports",
-    )
+    from sibyl.config import Config, SecConfig, UniverseConfig, _resolve_paths
+    paths = _resolve_paths(tmp_path, None, None)
     for p in (paths.raw, paths.clean, paths.logs):
         p.mkdir(parents=True, exist_ok=True)
     return Config(
         paths=paths,
         sec=SecConfig(user_agent="ua x@x", rate_limit_per_sec=8),
-        unicorn=UnicornConfig(base_url="https://example", universe_path="/api/universe",
-                              expected_contract_version="1.0", token="t"),
         universe=UniverseConfig(form_types=["10-K"], include_amendments=False,
                                 history_start="2016-01-01"),
         download_gzip=True,

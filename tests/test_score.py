@@ -149,19 +149,15 @@ def test_score_filing_skips_section_when_status_not_ok(tmp_path):
 @pytest.fixture
 def populated_corpus(tmp_path, conn) -> tuple[sqlite3.Connection, "Config"]:  # noqa: F821
     """Two fake filings on disk, both rows in `filings` table."""
-    from sibyl.config import Config, Paths, SecConfig, UnicornConfig, UniverseConfig
-    paths = Paths(
-        data_root=tmp_path, raw=tmp_path / "raw", clean=tmp_path / "clean",
-        logs=tmp_path / "logs", snapshots=tmp_path / "snapshots",
-        universe_json=tmp_path / "universe.json", db=tmp_path / "sibyl.db",
-        company_tickers=tmp_path / "company_tickers.json",
+    from dataclasses import replace
+    from sibyl.config import Config, SecConfig, UniverseConfig, _resolve_paths
+    paths = replace(
+        _resolve_paths(tmp_path, None, None),
         lm_dictionary=tmp_path / "lm.csv",
-        prices=tmp_path / "prices", exports=tmp_path / "exports",
     )
     cfg = Config(
         paths=paths,
         sec=SecConfig(user_agent="t", rate_limit_per_sec=1),
-        unicorn=UnicornConfig(base_url="", universe_path="", expected_contract_version="1.0", token=None),
         universe=UniverseConfig(form_types=[], include_amendments=False, history_start="2016"),
         download_gzip=True,
     )

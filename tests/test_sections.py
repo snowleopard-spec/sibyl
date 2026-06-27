@@ -29,6 +29,39 @@ def test_local_filing_reads_local_gz(tmp_path):
     assert "<body>hello" in f.html()
 
 
+def test_local_filing_accepts_form_type(tmp_path):
+    """LocalFiling must propagate form_type to edgar.Filing for the dispatch."""
+    p = tmp_path / "primary.html.gz"
+    with gzip.open(p, "wb") as f:
+        f.write(b"<html></html>")
+    f = sx.LocalFiling(cik=1, accession="x", html_path=p, form_type="10-Q")
+    assert f.form == "10-Q"
+
+
+def test_extract_via_edgartools_rejects_unsupported_form(tmp_path):
+    p = tmp_path / "primary.html.gz"
+    with gzip.open(p, "wb") as f:
+        f.write(b"<html></html>")
+    f = sx.LocalFiling(cik=1, accession="x", html_path=p, form_type="8-K")
+    with pytest.raises(ValueError, match="unsupported form_type"):
+        sx._extract_via_edgartools(f, "8-K")
+
+
+def test_section_status_min_ok_words_parameter_overrides_default():
+    """For 10-Q RF, min_ok_words=0 means a 3-word section is 'ok' with no flag."""
+    text = "no material changes"
+    status, info = sx._section_status(text, full_word_count=10_000, min_ok_words=0)
+    assert status == "ok"
+    assert "length_low" not in info["suspicious_flags"]
+
+
+def test_section_status_default_flags_short_section_low():
+    text = "short text here"
+    status, info = sx._section_status(text, full_word_count=10_000)
+    assert status == "ok"
+    assert "length_low" in info["suspicious_flags"]
+
+
 def test_section_status_ok():
     body = "Apple Inc. faces a range of risks. " * 200  # ~1,400 words
     status, info = sx._section_status(body, full_word_count=40_000)
@@ -70,6 +103,44 @@ def test_section_status_missing():
     status, info = sx._section_status("", full_word_count=40_000)
     assert status == "missing"
     assert info["word_count"] == 0
+
+
+# ---- _compute_filing_status (v2 taxonomy) -------------------------------------
+
+def test_filing_status_both_ok():
+    assert sx._compute_filing_status("ok", "ok") == "ok"
+
+
+def test_filing_status_one_ok_one_missing_is_partial():
+    """JPM 10-K pattern: MDNA missing/pointer, RF extracted cleanly."""
+    assert sx._compute_filing_status("ok", "missing") == "partial"
+    assert sx._compute_filing_status("missing", "ok") == "partial"
+
+
+def test_filing_status_one_ok_one_incorp_ref_is_partial():
+    """IBM 10-K pattern: MDNA refers to Annual Report, RF extracted cleanly."""
+    assert sx._compute_filing_status("ok", "incorp_ref") == "partial"
+    assert sx._compute_filing_status("incorp_ref", "ok") == "partial"
+
+
+def test_filing_status_any_over_extracted_is_section_fail():
+    """Boundary detection failure is a real bug, not a legitimate filing pattern."""
+    assert sx._compute_filing_status("ok", "over_extracted") == "section_fail"
+    assert sx._compute_filing_status("over_extracted", "ok") == "section_fail"
+    assert sx._compute_filing_status("over_extracted", "over_extracted") == "section_fail"
+    assert sx._compute_filing_status("missing", "over_extracted") == "section_fail"
+
+
+def test_filing_status_both_unusable_is_section_fail():
+    assert sx._compute_filing_status("missing", "missing") == "section_fail"
+    assert sx._compute_filing_status("incorp_ref", "incorp_ref") == "section_fail"
+    assert sx._compute_filing_status("missing", "incorp_ref") == "section_fail"
+
+
+def test_filing_status_parse_fail_trumps_everything():
+    """If the full text didn't clean, sections are moot."""
+    assert sx._compute_filing_status("ok", "ok", full_status="parse_fail") == "parse_fail"
+    assert sx._compute_filing_status("missing", "missing", full_status="parse_fail") == "parse_fail"
 
 
 @pytest.mark.skipif(
@@ -312,28 +383,13 @@ def test_extract_all_workers_2_matches_workers_1(tmp_path, conn):
 
 
 def _make_cfg(tmp_path: Path):
-    from sibyl.config import Config, Paths, SecConfig, UnicornConfig, UniverseConfig
-    data_root = tmp_path
-    paths = Paths(
-        data_root=data_root,
-        raw=data_root / "raw",
-        clean=data_root / "clean",
-        logs=data_root / "logs",
-        snapshots=data_root / "universe_snapshots",
-        universe_json=data_root / "universe.json",
-        db=data_root / "sibyl.db",
-        company_tickers=data_root / "company_tickers.json",
-        lm_dictionary=data_root / "lm_master_dictionary.csv",
-        prices=data_root / "prices",
-        exports=data_root / "exports",
-    )
+    from sibyl.config import Config, SecConfig, UniverseConfig, _resolve_paths
+    paths = _resolve_paths(tmp_path, None, None)
     for p in (paths.raw, paths.clean, paths.logs):
         p.mkdir(parents=True, exist_ok=True)
     return Config(
         paths=paths,
         sec=SecConfig(user_agent="ua x@x", rate_limit_per_sec=8),
-        unicorn=UnicornConfig(base_url="https://example", universe_path="/api/universe",
-                              expected_contract_version="1.0", token="t"),
         universe=UniverseConfig(form_types=["10-K"], include_amendments=False,
                                 history_start="2016-01-01"),
         download_gzip=True,

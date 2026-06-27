@@ -106,18 +106,23 @@ def compute_doc_frequencies(
     conn: sqlite3.Connection,
     cfg: Config,
     *,
+    stack: str = "sp500",
     ciks: list[int] | None = None,
 ) -> tuple[dict[str, int], int]:
-    """Pass 1: tokenize every eligible full.txt; return (df_per_token, n_docs).
+    """Pass 1: tokenize every eligible full.txt in the given stack; return
+    (df_per_token, n_docs). A document = one filing's full.txt."""
+    from .config import VALID_STACKS, stack_clean
+    if stack not in VALID_STACKS:
+        raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
+    clean_root = stack_clean(cfg, stack)
 
-    A document = one filing's `full.txt`. Counted once per (token, document)
-    regardless of frequency.
-    """
     df: Counter[str] = Counter()
     n_docs = 0
     cur = conn.cursor()
-    where = ["parse_status = 'ok'"]
-    params: list = []
+    # Include section_fail: those filings still have a clean `full` text
+    # (over_extracted only affects RF/MDNA; _section_eligible skips them).
+    where = ["parse_status IN ('ok', 'partial', 'section_fail')", "stack = ?"]
+    params: list = [stack]
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")
         params.extend(int(c) for c in ciks)
@@ -127,7 +132,7 @@ def compute_doc_frequencies(
     for r in rows:
         cik = int(r["cik"])
         accession = r["accession"]
-        full_path = filing_clean_dir(cfg.paths.clean, cik, accession) / "full.txt"
+        full_path = filing_clean_dir(clean_root, cik, accession) / "full.txt"
         if not full_path.exists():
             continue
         tokens = tokenize(full_path.read_text(encoding="utf-8"))
@@ -211,14 +216,17 @@ def score_filing(
 def _select_targets(
     conn: sqlite3.Connection,
     *,
+    stack: str = "sp500",
     ciks: list[int] | None,
     force: bool,
 ) -> tuple[list[tuple[int, str]], int]:
     """Return ((cik, accession), skipped_count). Skipped = already scored
-    at current SCORER_VERSION (full 6 rows present)."""
+    at current SCORER_VERSION (any rows present)."""
     cur = conn.cursor()
-    where = ["parse_status = 'ok'"]
-    params: list = []
+    # Include section_fail: those filings still have a clean `full` text
+    # (over_extracted only affects RF/MDNA; _section_eligible skips them).
+    where = ["parse_status IN ('ok', 'partial', 'section_fail')", "stack = ?"]
+    params: list = [stack]
     if ciks:
         where.append(f"cik IN ({','.join('?' for _ in ciks)})")
         params.extend(int(c) for c in ciks)
@@ -264,25 +272,39 @@ def score_all(
     conn: sqlite3.Connection,
     cfg: Config,
     *,
+    stack: str = "sp500",
     ciks: list[int] | None = None,
     limit: int | None = None,
     force: bool = False,
+    df_override: tuple[dict[str, int], int] | None = None,
 ) -> Counts:
-    """Two-pass driver: build corpus DF from full.txt, then score every section."""
-    counts = Counts()
-    lm = load_master_dictionary(cfg.paths.lm_dictionary)
+    """Two-pass driver: build corpus DF from full.txt, then score every section.
 
-    targets, skipped = _select_targets(conn, ciks=ciks, force=force)
+    `df_override` lets callers (e.g. queried.py) reuse a DF computed elsewhere
+    (typically from the S&P corpus, so queried-stack scores share IDF with the
+    benchmark set). When None, computes DF over the target stack.
+    """
+    from .config import VALID_STACKS, stack_clean
+    if stack not in VALID_STACKS:
+        raise ValueError(f"unknown stack {stack!r}; expected one of {VALID_STACKS}")
+    clean_root = stack_clean(cfg, stack)
+    counts = Counts()
+
+    targets, skipped = _select_targets(conn, stack=stack, ciks=ciks, force=force)
     counts.skipped = skipped
     if not targets:
         logger.info("Nothing to score (skipped=%d, no targets).", skipped)
         return counts
 
-    # Pass 1: corpus-wide DF from full.txt of all eligible filings (not just
-    # targets — DF should reflect the whole corpus we know about).
-    logger.info("Pass 1: computing document frequencies over full.txt corpus...")
-    df, n_docs = compute_doc_frequencies(conn, cfg, ciks=ciks)
-    logger.info("DF table: %d unique tokens over %d documents.", len(df), n_docs)
+    lm = load_master_dictionary(cfg.paths.lm_dictionary)
+
+    if df_override is not None:
+        df, n_docs = df_override
+        logger.info("Using supplied DF table: %d tokens over %d documents.", len(df), n_docs)
+    else:
+        logger.info("Pass 1: computing document frequencies over full.txt corpus (stack=%s)...", stack)
+        df, n_docs = compute_doc_frequencies(conn, cfg, stack=stack, ciks=ciks)
+        logger.info("DF table: %d unique tokens over %d documents.", len(df), n_docs)
 
     # Pass 2: score targets.
     logger.info("Pass 2: scoring %d filings (skipped %d already at v%s).",
@@ -291,7 +313,7 @@ def score_all(
         try:
             rows = score_filing(
                 cik, accession,
-                clean_root=cfg.paths.clean, lm=lm, df=df, n_docs=n_docs,
+                clean_root=clean_root, lm=lm, df=df, n_docs=n_docs,
             )
         except Exception as exc:
             logger.error("Score failed for %s/%s: %s", cik, accession, exc)
