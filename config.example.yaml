@@ -13,7 +13,7 @@ unicorn:
 universe:
   file: ./data/universe.json
   snapshots_dir: ./data/universe_snapshots
-  form_types: ["10-K", "10-Q"]
+  form_types: ["10-Q"]      # sentiment monitor is 10-Q only (spec §4.2)
   include_amendments: false
   history_start: "2016-01-01"
 

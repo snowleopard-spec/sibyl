@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sibyl — S&amp;P 500 Sentiment Monitor</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      color: #1a1a1a;
+      background: #fff;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+    .layout { display: flex; min-height: 100vh; }
+
+    aside.sidebar {
+      width: 160px;
+      flex-shrink: 0;
+      position: sticky;
+      top: 0;
+      align-self: flex-start;
+      height: 100vh;
+      overflow-y: auto;
+      border-right: 1px solid #e0e0e0;
+      padding: 16px 0;
+      background: #fafafa;
+    }
+    aside h2 {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #888;
+      margin: 0 16px 8px;
+    }
+    aside ul { list-style: none; padding: 0; margin: 0; }
+    aside li a {
+      display: block;
+      padding: 6px 16px;
+      color: #444;
+      text-decoration: none;
+      border-left: 3px solid transparent;
+    }
+    aside li a.active {
+      background: #fff;
+      color: #1a1a1a;
+      border-left-color: #4C72B0;
+      font-weight: 600;
+    }
+    aside li a:hover { background: #f0f0f0; }
+
+    main.content {
+      flex: 1;
+      padding: 20px 28px 40px;
+      min-width: 0;
+    }
+    header.report-header h1 {
+      font-size: 20px;
+      margin: 0 0 4px;
+    }
+    header.report-header .meta {
+      color: #666;
+      font-size: 12px;
+      margin-bottom: 12px;
+    }
+
+    .summary-bar {
+      background: #f5f5f5;
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      padding: 10px 14px;
+      margin-bottom: 20px;
+      font-size: 12px;
+    }
+    .summary-bar div { margin: 2px 0; }
+    .summary-bar .label {
+      display: inline-block;
+      width: 50px;
+      font-weight: 600;
+      color: #333;
+    }
+    .summary-bar .boundaries { color: #555; }
+
+    section.decile {
+      margin-bottom: 36px;
+      scroll-margin-top: 12px;
+    }
+    section.decile h2 {
+      font-size: 16px;
+      margin: 0 0 10px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #ddd;
+    }
+    .tables {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .table-block h3 {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #666;
+      margin: 0 0 6px;
+    }
+    table.ranks {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    table.ranks th {
+      text-align: left;
+      padding: 6px 8px;
+      background: #f0f0f0;
+      border-bottom: 1px solid #ddd;
+      font-weight: 600;
+      color: #555;
+    }
+    table.ranks th.num, table.ranks td.num { text-align: right; }
+    table.ranks tr.row { cursor: pointer; }
+    table.ranks tr.row:nth-child(odd) td { background: #fafafa; }
+    table.ranks tr.row:hover td { background: #f0f4f8; }
+    table.ranks tr.row td {
+      padding: 6px 8px;
+      border-bottom: 1px solid #eee;
+      vertical-align: middle;
+    }
+    table.ranks td.ticker-cell {
+      border-left-width: 4px;
+      border-left-style: solid;
+      font-weight: 600;
+    }
+    .neg, .words { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+    tr.detail { display: none; }
+    tr.detail.open { display: table-row; }
+    tr.detail td {
+      padding: 0 8px 12px 8px;
+      background: #fff !important;
+      border-bottom: 1px solid #ddd !important;
+    }
+    table.subfilings {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 4px 0 0 16px;
+      font-size: 11px;
+    }
+    table.subfilings th {
+      text-align: left;
+      padding: 4px 6px;
+      color: #888;
+      font-weight: 500;
+      border-bottom: 1px solid #eee;
+    }
+    table.subfilings td {
+      padding: 3px 6px;
+      border-bottom: 1px solid #f4f4f4;
+    }
+    table.subfilings td.num { text-align: right; }
+    table.subfilings .section-label {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      background: #eee;
+      color: #555;
+    }
+    .empty {
+      color: #999;
+      font-style: italic;
+      padding: 8px 4px;
+    }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <h2>Deciles</h2>
+    <ul id="decile-nav">
+      {% for n in range(1, 11) %}
+      <li><a href="#decile-{{ n }}" data-target="decile-{{ n }}">Decile {{ n }}</a></li>
+      {% endfor %}
+    </ul>
+  </aside>
+
+  <main class="content">
+    <header class="report-header">
+      <h1>Sibyl — S&amp;P 500 Sentiment Monitor</h1>
+      <div class="meta">
+        Last updated: <span class="mono">{{ last_refresh }}</span>
+        &nbsp;·&nbsp;
+        <span>{{ score_summary.mdna.n_scored }} constituents scored (MD&amp;A)</span>
+      </div>
+    </header>
+
+    <div class="summary-bar">
+      <div>
+        <span class="label">MD&amp;A:</span>
+        <span>{{ score_summary.mdna.n_scored }} scored</span>
+        {% if score_summary.mdna.decile_boundaries %}
+        &nbsp;·&nbsp;
+        <span class="boundaries mono">Boundaries:
+          {%- for b in score_summary.mdna.decile_boundaries %}
+            {{ "%.4f"|format(b) }}{% if not loop.last %} | {% endif %}
+          {%- endfor %}
+        </span>
+        {% endif %}
+      </div>
+      <div>
+        <span class="label">Risk:</span>
+        <span>{{ score_summary.risk.n_scored }} scored</span>
+        {% if score_summary.risk.decile_boundaries %}
+        &nbsp;·&nbsp;
+        <span class="boundaries mono">Boundaries:
+          {%- for b in score_summary.risk.decile_boundaries %}
+            {{ "%.4f"|format(b) }}{% if not loop.last %} | {% endif %}
+          {%- endfor %}
+        </span>
+        {% endif %}
+      </div>
+    </div>
+
+    {% for n in range(1, 11) %}
+    {% set decile = deciles[n] %}
+    <section class="decile" id="decile-{{ n }}">
+      <h2>Decile {{ n }}</h2>
+      <div class="tables">
+        {% for which, label in [("mdna", "MD&A"), ("risk", "Risk Factors")] %}
+        <div class="table-block">
+          <h3>{{ label|safe }}</h3>
+          {% if decile[which] %}
+          <table class="ranks">
+            <thead>
+              <tr>
+                <th class="num">#</th>
+                <th>Ticker</th>
+                <th>Name</th>
+                <th>Sector</th>
+                <th class="num">Mean Neg</th>
+                <th class="num">Filings</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for row in decile[which] %}
+              <tr class="row" data-toggle="d{{ n }}-{{ which }}-{{ loop.index }}">
+                <td class="num">{{ row.rank }}</td>
+                <td class="ticker-cell mono" style="border-left-color: {{ row.sector_colour }};">{{ row.ticker }}</td>
+                <td>{{ row.name }}</td>
+                <td>{{ row.sector }}</td>
+                <td class="num neg">{{ "%.5f"|format(row.mean_neg) }}</td>
+                <td class="num">{{ row.filing_count }}</td>
+              </tr>
+              <tr class="detail" id="d{{ n }}-{{ which }}-{{ loop.index }}">
+                <td colspan="6">
+                  {% if row.filings %}
+                  <table class="subfilings">
+                    <thead>
+                      <tr>
+                        <th>Filing Date</th>
+                        <th>Period</th>
+                        <th>Section</th>
+                        <th class="num">Neg</th>
+                        <th class="num">Words</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                    {% for f in row.filings %}
+                      <tr>
+                        <td class="mono">{{ f.acceptance_dt }}</td>
+                        <td class="mono">{{ f.period_of_report }}</td>
+                        <td><span class="section-label">{{ f.section }}</span></td>
+                        <td class="num neg">{{ "%.5f"|format(f.neg) if f.neg is not none else "—" }}</td>
+                        <td class="num words">{{ f.total_words if f.total_words is not none else "—" }}</td>
+                      </tr>
+                    {% endfor %}
+                    </tbody>
+                  </table>
+                  {% else %}
+                  <div class="empty">no filing detail</div>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <div class="empty">no constituents in this decile</div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endfor %}
+  </main>
+</div>
+
+<script>
+  // Expand/collapse filing detail on row click.
+  document.querySelectorAll('tr.row[data-toggle]').forEach(function (row) {
+    row.addEventListener('click', function () {
+      var target = document.getElementById(row.dataset.toggle);
+      if (target) target.classList.toggle('open');
+    });
+  });
+
+  // Sidebar active-decile highlight via Intersection Observer.
+  var navLinks = {};
+  document.querySelectorAll('aside.sidebar a[data-target]').forEach(function (a) {
+    navLinks[a.dataset.target] = a;
+  });
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      var link = navLinks[entry.target.id];
+      if (!link) return;
+      if (entry.isIntersecting) {
+        Object.values(navLinks).forEach(function (l) { l.classList.remove('active'); });
+        link.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-40% 0px -55% 0px', threshold: 0 });
+  document.querySelectorAll('section.decile').forEach(function (s) { observer.observe(s); });
+</script>
+</body>
+</html>

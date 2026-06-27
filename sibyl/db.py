@@ -35,20 +35,6 @@ CREATE TABLE IF NOT EXISTS sp500_membership (
 CREATE INDEX IF NOT EXISTS idx_sp500_membership_sector ON sp500_membership(sector);
 CREATE INDEX IF NOT EXISTS idx_sp500_membership_cik    ON sp500_membership(cik);
 
-CREATE TABLE IF NOT EXISTS sp500_aggregates (
-    as_of_date    TEXT NOT NULL,
-    scope         TEXT NOT NULL,
-    section       TEXT NOT NULL,
-    metric        TEXT NOT NULL,
-    form_type     TEXT NOT NULL DEFAULT '10-K',
-    mean_value    REAL,
-    median_value  REAL,
-    n_filings     INTEGER,
-    computed_at   TEXT,
-    PRIMARY KEY (as_of_date, scope, section, metric, form_type)
-);
-CREATE INDEX IF NOT EXISTS idx_sp500_agg_scope ON sp500_aggregates(scope, section, metric, form_type);
-
 CREATE TABLE IF NOT EXISTS filing_scores (
     accession      TEXT NOT NULL,
     section        TEXT NOT NULL,
@@ -66,21 +52,6 @@ CREATE TABLE IF NOT EXISTS filing_scores (
     PRIMARY KEY (accession, section, weighting),
     FOREIGN KEY (accession) REFERENCES filings(accession)
 );
-
-CREATE TABLE IF NOT EXISTS filing_signals (
-    cik             INTEGER NOT NULL,
-    accession       TEXT NOT NULL,
-    prior_accession TEXT,
-    section         TEXT NOT NULL,
-    diff_version    TEXT NOT NULL DEFAULT '1',
-    similarity_yoy  REAL,
-    d_unc           REAL,
-    d_lit           REAL,
-    d_neg           REAL,
-    computed_at     TEXT,
-    PRIMARY KEY (accession, section),
-    FOREIGN KEY (accession) REFERENCES filings(accession)
-);
 """
 
 
@@ -96,19 +67,9 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    # Pre-migration: legacy sp500_aggregates lacked form_type in its PK. Since
-    # the table is purely derived (rebuilt from filing_signals by aggregate
-    # module), the safe migration is to drop it; next rebuild_aggregates() call
-    # repopulates with the new schema.
-    cur = conn.execute("PRAGMA table_info(sp500_aggregates)")
-    cols = [row[1] for row in cur.fetchall()]
-    if cols and "form_type" not in cols:
-        conn.execute("DROP TABLE sp500_aggregates")
-
     conn.executescript(SCHEMA)
     # Idempotent column-additions for older DBs created before a column existed.
     _ensure_column(conn, "filing_scores", "scorer_version", "TEXT NOT NULL DEFAULT '1'")
-    _ensure_column(conn, "filing_signals", "diff_version", "TEXT NOT NULL DEFAULT '1'")
     _ensure_column(conn, "filings", "stack", "TEXT NOT NULL DEFAULT 'sp500'")
     # Created *after* the column-add so legacy DBs migrate cleanly.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_filings_stack ON filings(stack)")
@@ -126,9 +87,6 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str)
 def counts(conn: sqlite3.Connection) -> dict[str, int]:
     cur = conn.cursor()
     out = {}
-    for table in (
-        "filings", "filing_scores", "filing_signals",
-        "sp500_membership", "sp500_aggregates",
-    ):
+    for table in ("filings", "filing_scores", "sp500_membership"):
         out[table] = cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     return out

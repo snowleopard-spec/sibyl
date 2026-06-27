@@ -1,88 +1,55 @@
-# Sibyl
+# Sibyl — S&P 500 Sentiment Monitor
 
-SEC filing signal research engine. See `SIBYL BUILD SPEC.md` for the full
-architecture and `SIBYL_HANDOFF.md` for the Unicorn Hunt `/api/universe`
-contract.
+Sibyl is a self-contained S&P 500 sentiment monitor. For each constituent,
+it scores the MD&A and Risk Factors sections of the last four 10-Q filings
+with the Loughran-McDonald (LM) negative-words dictionary, ranks
+constituents into deciles, and serves the results via a local Flask page.
 
-This README covers the scaffolding + Stage 0 (`sibyl universe`) milestone.
-Later stages (download, parse, score, signal layer, evaluation engine,
-export) are stubbed.
+See `SIBYL_SENTIMENT_SPEC.md` for the full build spec.
 
-## Setup
+## Quickstart
 
 ```bash
-# from the repo root
+# 1. Install
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
+
+# 2. Configure
+cp config.example.yaml config.yaml
+# edit sec.user_agent to your "Name email@host" form
+
+# 3. (Optional) carry an existing corpus across instead of re-pulling
+# cp -r /path/to/research-tool/data ./data
+
+# 4. Refresh membership + score any new filings (10-Q only)
+sibyl refresh
+
+# 5. Serve
+sibyl serve
+# Open http://localhost:5000
 ```
 
-## Configure
+## CLI
 
-1. Copy the example config and edit the Unicorn host + SEC User-Agent:
+| Command | Description |
+| --- | --- |
+| `sibyl refresh` | Full pipeline: membership → download → parse → sections → score (10-Q only). Writes `data/last_refresh.txt`. |
+| `sibyl rank` | Print decile-ranked tickers as a terminal table. |
+| `sibyl serve` | Start the local Flask report at `http://localhost:5000`. |
+| `sibyl status` | DB row counts + disk usage. |
+| `sibyl download` / `parse` / `sections` / `score` | Sub-steps of `refresh`; useful for debugging. |
 
-    ```bash
-    cp config.example.yaml config.yaml
-    ```
-
-    - `unicorn.base_url`: the Unicorn Hunt droplet URL (HTTPS).
-    - `sec.user_agent`: required by SEC on every request (see
-      `SIBYL BUILD SPEC.md` §7), in the form `"Name contact@email.com"`.
-
-2. Generate the Unicorn API token once and install it in two places
-   (`SIBYL_HANDOFF.md` §3):
-
-    ```bash
-    python -c "import secrets; print(secrets.token_urlsafe(32))"
-    ```
-
-    - Set `SIBYL_API_TOKEN=<value>` on the Unicorn droplet's env and
-      restart its FastAPI app.
-    - Create `.env` in this repo with `SIBYL_UNICORN_TOKEN=<same-value>`.
-
-## L&M dictionary (Stage 4 input, sanity-checked now)
+## Loughran-McDonald dictionary
 
 Download `Loughran-McDonald_MasterDictionary_1993-2025.csv` from
 <https://sraf.nd.edu/loughranmcdonald-master-dictionary/> and save it to
-`data/lm_master_dictionary.csv`. Then:
+`data/lm_master_dictionary.csv`. Then sanity-check it:
 
 ```bash
 python -m sibyl.lm_dictionary
 ```
 
-This prints the row count and per-category word counts — a five-minute
-de-risk that confirms the file is well-formed before any later stage
-needs it.
-
-## Run Stage 0
-
-```bash
-sibyl universe
-```
-
-What it does:
-1. GET `<base_url>/api/universe` with bearer auth.
-2. Validate `contract_version`; warn loudly on mismatch.
-3. Snapshot the response verbatim to `data/universe_snapshots/`.
-4. Upsert into `universe_membership` (survivorship-bias defense).
-5. Cache SEC's `company_tickers.json` and resolve ticker → CIK.
-6. Log unresolved tickers (delistings, foreign listings, etc).
-
-Re-running on the same day is idempotent.
-
-## CLI
-
-| Command | Status |
-| --- | --- |
-| `sibyl universe` | implemented |
-| `sibyl status` | implemented (counts + disk usage) |
-| `sibyl download` | stub |
-| `sibyl parse` | stub |
-| `sibyl score` | stub |
-| `sibyl diff` | stub |
-| `sibyl prices` | stub |
-| `sibyl panel` | stub |
-| `sibyl eval` | stub |
-| `sibyl export` | stub |
+This prints the row count and per-category word counts.
 
 ## Tests
 
@@ -90,4 +57,4 @@ Re-running on the same day is idempotent.
 pytest
 ```
 
-No tests hit the network; the universe test uses a recorded JSON fixture.
+No tests hit the network; fixtures cover the EDGAR + Wikipedia paths.
