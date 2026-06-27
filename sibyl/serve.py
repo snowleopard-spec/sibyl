@@ -17,20 +17,22 @@ from . import db as db_mod
 from . import rank as rank_mod
 
 
+# Folio-allocation palette, mapped onto the 11 GICS sectors. Earth tones,
+# stable across refreshes so the same sector keeps its swatch.
 SECTOR_COLOURS = {
-    "Information Technology":  "#4C72B0",
-    "Health Care":             "#DD8452",
-    "Financials":              "#55A868",
-    "Consumer Discretionary":  "#C44E52",
-    "Industrials":             "#8172B3",
-    "Communication Services":  "#937860",
-    "Consumer Staples":        "#DA8BC3",
-    "Energy":                  "#8C8C8C",
-    "Utilities":               "#CCB974",
-    "Real Estate":             "#64B5CD",
-    "Materials":               "#A6D854",
+    "Information Technology":  "#8B7355",  # warm brown (folio primary)
+    "Health Care":             "#A0522D",  # sienna
+    "Financials":              "#556B2F",  # olive (folio accent)
+    "Consumer Discretionary":  "#CD853F",  # peru
+    "Industrials":             "#708090",  # slate
+    "Communication Services":  "#9E7B5B",  # light taupe
+    "Consumer Staples":        "#6B8E6B",  # sage
+    "Energy":                  "#8B6914",  # dark goldenrod
+    "Utilities":               "#B8860B",  # goldenrod
+    "Real Estate":             "#7B6B5A",  # warm grey
+    "Materials":               "#665544",  # deep brown
 }
-DEFAULT_COLOUR = "#BBBBBB"
+DEFAULT_COLOUR = "#A09080"  # taupe (folio muted text)
 
 
 def _last_refresh(data_root: Path) -> str:
